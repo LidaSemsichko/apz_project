@@ -1,0 +1,737 @@
+# API Specification
+
+## 1. Overview
+
+The Movie Review Platform exposes its functionality through an API Gateway. The API Gateway is the single external entry point for the frontend application and routes HTTP requests to internal microservices.
+
+Local base URL:
+
+```text
+http://localhost:8000
+```
+
+Main services:
+
+| Service | Responsibility |
+|---|---|
+| API Gateway | Routes requests to microservices |
+| Auth Service | Registration, login, logout, JWT verification, user lookup |
+| Catalog Service | Movie catalog and search |
+| Reviews Service | Review creation and retrieval, Kafka producer |
+| Feed Service | Follow relationships, personal feed, Neo4j graph, Kafka consumer |
+
+---
+
+## 2. API Gateway
+
+### Health check
+
+```http
+GET /health
+```
+
+Response:
+
+```json
+{
+  "status": "ok",
+  "service": "api-gateway"
+}
+```
+
+### Root endpoint
+
+```http
+GET /
+```
+
+Response:
+
+```json
+{
+  "message": "Movie Review Platform API Gateway is running",
+  "routes": {
+    "auth": "/auth",
+    "catalog": "/catalog",
+    "reviews": "/reviews",
+    "feed": "/feed"
+  }
+}
+```
+
+---
+
+# 3. Auth API
+
+Base path:
+
+```text
+/auth
+```
+
+The Auth Service is responsible for user management and authentication. It stores users in PostgreSQL and active JWT token identifiers in Redis.
+
+---
+
+## 3.1 Register
+
+```http
+POST /auth/register
+```
+
+Request:
+
+```json
+{
+  "email": "user@example.com",
+  "username": "username",
+  "password": "123456"
+}
+```
+
+Response:
+
+```json
+{
+  "id": 1,
+  "email": "user@example.com",
+  "username": "username",
+  "instance": "auth-service-1"
+}
+```
+
+Possible errors:
+
+| Status | Description |
+|---|---|
+| 409 | Email already exists |
+| 409 | Username already exists |
+| 422 | Invalid request body |
+
+---
+
+## 3.2 Login
+
+```http
+POST /auth/login
+```
+
+Request:
+
+```json
+{
+  "email": "user@example.com",
+  "password": "123456"
+}
+```
+
+Response:
+
+```json
+{
+  "access_token": "jwt-token",
+  "token_type": "bearer",
+  "user_id": 1,
+  "email": "user@example.com",
+  "instance": "auth-service-1"
+}
+```
+
+Possible errors:
+
+| Status | Description |
+|---|---|
+| 401 | Invalid email or password |
+
+---
+
+## 3.3 Verify token
+
+```http
+GET /auth/verify
+```
+
+Headers:
+
+```http
+Authorization: Bearer <jwt-token>
+```
+
+Response:
+
+```json
+{
+  "valid": true,
+  "user_id": 1,
+  "email": "user@example.com",
+  "instance": "auth-service-1"
+}
+```
+
+Possible errors:
+
+| Status | Description |
+|---|---|
+| 401 | Token is missing |
+| 401 | Token is invalid |
+| 401 | Token expired or logged out |
+
+---
+
+## 3.4 Get current user
+
+```http
+GET /auth/me
+```
+
+Headers:
+
+```http
+Authorization: Bearer <jwt-token>
+```
+
+Response:
+
+```json
+{
+  "id": 1,
+  "email": "user@example.com",
+  "username": "username",
+  "instance": "auth-service-1"
+}
+```
+
+---
+
+## 3.5 Logout
+
+```http
+POST /auth/logout
+```
+
+Headers:
+
+```http
+Authorization: Bearer <jwt-token>
+```
+
+Response:
+
+```json
+{
+  "message": "Logged out successfully",
+  "instance": "auth-service-1"
+}
+```
+
+After logout, the same JWT can no longer be verified because its token identifier is removed from Redis.
+
+---
+
+## 3.6 Get all users
+
+```http
+GET /auth/users
+```
+
+Response:
+
+```json
+[
+  {
+    "id": 1,
+    "email": "user@example.com",
+    "username": "username"
+  }
+]
+```
+
+---
+
+## 3.7 Find user by username
+
+```http
+GET /auth/users/by-username/{username}
+```
+
+Example:
+
+```http
+GET /auth/users/by-username/sasha
+```
+
+Response:
+
+```json
+{
+  "id": 1,
+  "email": "sasha@example.com",
+  "username": "sasha"
+}
+```
+
+---
+
+## 3.8 Auth health check
+
+```http
+GET /auth/health
+```
+
+Response:
+
+```json
+{
+  "status": "ok",
+  "service": "auth-service",
+  "instance": "auth-service-1"
+}
+```
+
+---
+
+# 4. Catalog API
+
+Base path:
+
+```text
+/catalog
+```
+
+The Catalog Service manages movies. Movie data is stored in MongoDB Replica Set.
+
+---
+
+## 4.1 Create movie
+
+```http
+POST /catalog
+```
+
+Request:
+
+```json
+{
+  "title": "Interstellar",
+  "description": "A science fiction film about space, time, gravity, and human survival.",
+  "genres": ["Sci-Fi", "Drama", "Adventure"],
+  "year": 2014,
+  "director": "Christopher Nolan",
+  "poster_url": "https://example.com/interstellar.jpg"
+}
+```
+
+Response:
+
+```json
+{
+  "id": "movie-id",
+  "title": "Interstellar",
+  "description": "A science fiction film about space, time, gravity, and human survival.",
+  "genres": ["Sci-Fi", "Drama", "Adventure"],
+  "year": 2014,
+  "director": "Christopher Nolan",
+  "poster_url": "https://example.com/interstellar.jpg"
+}
+```
+
+---
+
+## 4.2 Get all movies
+
+```http
+GET /catalog
+```
+
+Response:
+
+```json
+[
+  {
+    "id": "movie-id",
+    "title": "Interstellar",
+    "description": "A science fiction film about space, time, gravity, and human survival.",
+    "genres": ["Sci-Fi", "Drama", "Adventure"],
+    "year": 2014,
+    "director": "Christopher Nolan",
+    "poster_url": "https://example.com/interstellar.jpg"
+  }
+]
+```
+
+---
+
+## 4.3 Get movie by id
+
+```http
+GET /catalog/{movie_id}
+```
+
+Response:
+
+```json
+{
+  "id": "movie-id",
+  "title": "Interstellar",
+  "description": "A science fiction film about space, time, gravity, and human survival.",
+  "genres": ["Sci-Fi", "Drama", "Adventure"],
+  "year": 2014,
+  "director": "Christopher Nolan",
+  "poster_url": "https://example.com/interstellar.jpg"
+}
+```
+
+Possible errors:
+
+| Status | Description |
+|---|---|
+| 404 | Movie not found |
+
+---
+
+## 4.4 Search movies
+
+Search by title:
+
+```http
+GET /catalog/search?title=inter
+```
+
+Search by genre:
+
+```http
+GET /catalog/search?genre=Sci-Fi
+```
+
+Search by year:
+
+```http
+GET /catalog/search?year=2014
+```
+
+Combined search:
+
+```http
+GET /catalog/search?title=inter&genre=Sci-Fi&year=2014
+```
+
+Response:
+
+```json
+[
+  {
+    "id": "movie-id",
+    "title": "Interstellar",
+    "description": "A science fiction film about space, time, gravity, and human survival.",
+    "genres": ["Sci-Fi", "Drama", "Adventure"],
+    "year": 2014,
+    "director": "Christopher Nolan",
+    "poster_url": "https://example.com/interstellar.jpg"
+  }
+]
+```
+
+---
+
+## 4.5 Catalog health check
+
+```http
+GET /catalog/health
+```
+
+Response:
+
+```json
+{
+  "status": "ok",
+  "service": "catalog-service"
+}
+```
+
+---
+
+# 5. Reviews API
+
+Base path:
+
+```text
+/reviews
+```
+
+The Reviews Service stores reviews in PostgreSQL and publishes `review.created` events to Kafka.
+
+---
+
+## 5.1 Create review
+
+```http
+POST /reviews
+```
+
+Request:
+
+```json
+{
+  "user_id": 1,
+  "item_id": "movie-id",
+  "text": "Great movie with strong atmosphere and story.",
+  "rating": 9
+}
+```
+
+Response:
+
+```json
+{
+  "id": 1,
+  "user_id": 1,
+  "item_id": "movie-id",
+  "text": "Great movie with strong atmosphere and story.",
+  "rating": 9,
+  "created_at": "2026-05-10T13:05:03.411227",
+  "event_published": true
+}
+```
+
+Notes:
+
+- `rating` must be between 1 and 10.
+- After saving the review, Reviews Service publishes a Kafka event to topic `review.created`.
+
+---
+
+## 5.2 Get all reviews
+
+```http
+GET /reviews
+```
+
+Response:
+
+```json
+[
+  {
+    "id": 1,
+    "user_id": 1,
+    "item_id": "movie-id",
+    "text": "Great movie with strong atmosphere and story.",
+    "rating": 9,
+    "created_at": "2026-05-10T13:05:03.411227",
+    "event_published": false
+  }
+]
+```
+
+---
+
+## 5.3 Get reviews by movie
+
+```http
+GET /reviews/item/{item_id}
+```
+
+Response:
+
+```json
+[
+  {
+    "id": 1,
+    "user_id": 1,
+    "item_id": "movie-id",
+    "text": "Great movie with strong atmosphere and story.",
+    "rating": 9,
+    "created_at": "2026-05-10T13:05:03.411227",
+    "event_published": false
+  }
+]
+```
+
+---
+
+## 5.4 Get reviews by user
+
+```http
+GET /reviews/user/{user_id}
+```
+
+Response:
+
+```json
+[
+  {
+    "id": 1,
+    "user_id": 1,
+    "item_id": "movie-id",
+    "text": "Great movie with strong atmosphere and story.",
+    "rating": 9,
+    "created_at": "2026-05-10T13:05:03.411227",
+    "event_published": false
+  }
+]
+```
+
+---
+
+## 5.5 Reviews health check
+
+```http
+GET /reviews/health
+```
+
+Response:
+
+```json
+{
+  "status": "ok",
+  "service": "reviews-service"
+}
+```
+
+---
+
+# 6. Feed API
+
+Base path:
+
+```text
+/feed
+```
+
+The Feed Service manages follow relationships, consumes Kafka events, and stores social graph data in Neo4j.
+
+---
+
+## 6.1 Follow user
+
+```http
+POST /feed/follow/{following_id}?follower_id={follower_id}
+```
+
+Example:
+
+```http
+POST /feed/follow/2?follower_id=1
+```
+
+Response:
+
+```json
+{
+  "message": "User followed successfully",
+  "follower_id": 1,
+  "following_id": 2
+}
+```
+
+---
+
+## 6.2 Get personal feed
+
+```http
+GET /feed?user_id=1
+```
+
+Response:
+
+```json
+[
+  {
+    "review_id": 2,
+    "user_id": 2,
+    "item_id": "movie-id",
+    "text": "A visually powerful movie with excellent storytelling.",
+    "rating": 9,
+    "created_at": "2026-05-10T13:10:06.167602"
+  }
+]
+```
+
+---
+
+## 6.3 Get recommendations
+
+```http
+GET /feed/recommendations?user_id=1
+```
+
+Response:
+
+```json
+[
+  {
+    "item_id": "movie-id",
+    "score": 2
+  }
+]
+```
+
+---
+
+## 6.4 Feed health check
+
+```http
+GET /feed/health
+```
+
+Response:
+
+```json
+{
+  "status": "ok",
+  "service": "feed-service"
+}
+```
+
+---
+
+# 7. Kafka Event Specification
+
+## Topic
+
+```text
+review.created
+```
+
+## Producer
+
+```text
+Reviews Service
+```
+
+## Consumer
+
+```text
+Feed Service
+```
+
+## Event payload
+
+```json
+{
+  "event_type": "review.created",
+  "review_id": 1,
+  "user_id": 1,
+  "item_id": "movie-id",
+  "text": "Great movie with strong atmosphere and story.",
+  "rating": 9,
+  "created_at": "2026-05-10T13:05:03.411227"
+}
+```
+
+## Event flow
+
+```text
+User creates review
+        |
+        v
+Reviews Service stores review in PostgreSQL
+        |
+        v
+Reviews Service publishes review.created event to Kafka
+        |
+        v
+Feed Service consumes event
+        |
+        v
+Feed Service updates Neo4j graph
+```
