@@ -686,3 +686,20 @@ docs/use-cases.md
 - Neo4j
 - Docker
 - Docker Compose
+
+
+## Spec-Driven Development
+
+This project follows a lightweight Spec-Driven Development approach inspired by GitHub Spec Kit and specs.md Simple Flow.
+
+SDD artifacts are stored in:
+
+- docs/sdd-spec.md
+- docs/demo-scenarios.md
+- specs/001-movie-review-platform/spec.md
+- specs/001-movie-review-platform/plan.md
+- specs/001-movie-review-platform/data-model.md
+- specs/001-movie-review-platform/contracts.md
+- specs/001-movie-review-platform/events.md
+- specs/001-movie-review-platform/tasks.md
+- specs/001-movie-review-platform/traceability.md
