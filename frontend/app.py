@@ -236,6 +236,9 @@ def init_state():
 def api(method, path, payload=None, token=None):
     headers = {}
 
+    if token is None:
+        token = st.session_state.get("token")
+
     if token:
         headers["Authorization"] = f"Bearer {token}"
 
@@ -283,26 +286,11 @@ def get_user_by_username(username):
 
 
 def save_session_to_url():
-    if st.session_state.token:
-        st.query_params["token"] = st.session_state.token
+    return
 
 
 def restore_session_from_url():
-    if st.session_state.token and st.session_state.user:
-        return
-
-    token = st.query_params.get("token")
-
-    if not token:
-        return
-
-    try:
-        profile = get("/auth/me", token=token)
-        st.session_state.token = token
-        st.session_state.user = profile
-        save_session_to_url()
-    except Exception:
-        st.query_params.clear()
+    return
 
 
 def hero():
@@ -500,6 +488,25 @@ def ensure_demo_movies():
     return movies, created, skipped
 
 
+def get_demo_token(username):
+    demo_user = next(
+        (user for user in DEMO_USERS if user["username"] == username),
+        None,
+    )
+    if not demo_user:
+        return st.session_state.token
+
+    login = post(
+        "/auth/login",
+        {
+            "email": demo_user["email"],
+            "password": demo_user["password"],
+        },
+        token=None,
+    )
+    return login["access_token"]
+
+
 def seed_demo_reviews(users, movies):
     if not users or not movies:
         return 0
@@ -538,14 +545,14 @@ def seed_demo_reviews(users, movies):
             continue
 
         payload = {
-            "user_id": user["id"],
             "item_id": movie["id"],
             "text": text,
             "rating": 7 + (index % 4),
         }
 
         try:
-            post("/reviews", payload)
+            token = get_demo_token(user["username"])
+            post("/reviews", payload, token=token)
             existing_keys.add(key)
             created += 1
         except Exception:
@@ -588,7 +595,12 @@ def seed_demo_follows(users):
             continue
 
         try:
-            post(f"/feed/follow/{following['id']}?follower_id={follower['id']}")
+            token = (
+                st.session_state.token
+                if current_user and current_user["username"] == follower_username
+                else get_demo_token(follower_username)
+            )
+            post(f"/feed/follow/{following['id']}", token=token)
             created += 1
         except Exception:
             pass
@@ -707,8 +719,8 @@ def review_card(review, users_map=None, movies_map=None, show_open_button=True):
     users_map = users_map or {}
     movies_map = movies_map or {}
 
-    username = users_map.get(review["user_id"], f"user-{review['user_id']}")
-    movie = movies_map.get(review["item_id"])
+    username = review.get("username") or users_map.get(review["user_id"], f"user-{review['user_id']}")
+    movie = review.get("movie") or movies_map.get(review["item_id"])
 
     movie_title = movie["title"] if movie else f"Movie {review['item_id']}"
     movie_year = movie["year"] if movie else ""
@@ -784,7 +796,7 @@ def page_reviews():
         st.markdown("### Reviews for this movie")
 
         try:
-            movie_reviews = get(f"/reviews/item/{movie['id']}")
+            movie_reviews = get(f"/reviews/enriched?item_id={movie['id']}")
 
             if not movie_reviews:
                 st.info("No reviews for this movie yet.")
@@ -818,7 +830,6 @@ def page_reviews():
                 result = post(
                     "/reviews",
                     {
-                        "user_id": st.session_state.user["id"],
                         "item_id": movie["id"],
                         "text": text,
                         "rating": int(rating),
@@ -835,7 +846,7 @@ def page_reviews():
     st.markdown("### All reviews")
 
     try:
-        reviews = get("/reviews")
+        reviews = get("/reviews/enriched")
 
         if not reviews:
             st.info("No reviews yet.")
@@ -877,7 +888,7 @@ def page_feed():
                     selected_user = get_user_by_username(selected_username)
 
                     post(
-                        f"/feed/follow/{selected_user['id']}?follower_id={st.session_state.user['id']}"
+                        f"/feed/follow/{selected_user['id']}"
                     )
 
                     st.success(f"You now follow @{selected_username}")
@@ -889,7 +900,7 @@ def page_feed():
             st.rerun()
 
         try:
-            feed = get(f"/feed?user_id={st.session_state.user['id']}")
+            feed = get("/feed/enriched")
 
             if not feed:
                 st.info("Your feed is empty. Follow someone who has written reviews.")

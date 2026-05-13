@@ -38,6 +38,7 @@ class HealthResponse(BaseModel):
     status: str
     service: str
     instance: str
+    dependencies: dict[str, str] = {}
 
 class UserLookupResponse(BaseModel):
     id: int

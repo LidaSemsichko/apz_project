@@ -1,9 +1,10 @@
 from datetime import datetime
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class ReviewCreate(BaseModel):
-    user_id: int
+    model_config = ConfigDict(extra="forbid")
+
     item_id: str
     text: str
     rating: int = Field(ge=1, le=10)
@@ -16,9 +17,9 @@ class ReviewResponse(BaseModel):
     text: str
     rating: int
     created_at: datetime
-    event_published: bool = False
 
 
 class HealthResponse(BaseModel):
     status: str
     service: str
+    dependencies: dict[str, str] = {}

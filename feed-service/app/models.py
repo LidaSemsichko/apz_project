@@ -21,3 +21,4 @@ class FeedItem(BaseModel):
 class HealthResponse(BaseModel):
     status: str
     service: str
+    dependencies: dict[str, str] = {}

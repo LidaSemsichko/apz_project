@@ -3,16 +3,17 @@ import uuid
 from datetime import datetime, timedelta, timezone
 
 import redis
-from fastapi import HTTPException, status
-from jose import jwt, JWTError
+from jose import JWTError, jwt
 from passlib.context import CryptContext
 
+from common.errors import ConflictError, NotFoundError, UnauthorizedError
 from app.repository import (
     create_user,
+    get_all_users,
+    get_database_health,
     get_user_by_email,
     get_user_by_id,
     get_user_by_username,
-    get_all_users
 )
 
 
@@ -23,7 +24,14 @@ REDIS_URL = os.getenv("REDIS_URL", "redis://redis:6379/0")
 INSTANCE_NAME = os.getenv("INSTANCE_NAME", "auth-service")
 
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
-redis_client = redis.from_url(REDIS_URL, decode_responses=True)
+_redis_client = None
+
+
+def get_redis_client():
+    global _redis_client
+    if _redis_client is None:
+        _redis_client = redis.from_url(REDIS_URL, decode_responses=True)
+    return _redis_client
 
 
 def hash_password(password: str) -> str:
@@ -35,12 +43,11 @@ def verify_password(password: str, password_hash: str) -> bool:
 
 
 def register_user(email: str, username: str, password: str):
-    existing_user = get_user_by_email(email)
-    if existing_user:
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail="User with this email already exists"
-        )
+    if get_user_by_email(email):
+        raise ConflictError("User with this email already exists")
+
+    if get_user_by_username(username):
+        raise ConflictError("User with this username already exists")
 
     password_hash = hash_password(password)
     return create_user(email=email, username=username, password_hash=password_hash)
@@ -56,13 +63,13 @@ def create_access_token(user_id: int, email: str) -> str:
         "email": email,
         "jti": token_id,
         "iat": int(now.timestamp()),
-        "exp": int(expires_at.timestamp())
+        "exp": int(expires_at.timestamp()),
     }
 
     token = jwt.encode(payload, JWT_SECRET, algorithm=JWT_ALGORITHM)
 
     redis_key = f"auth_token:{token_id}"
-    redis_client.setex(redis_key, TOKEN_TTL_SECONDS, str(user_id))
+    get_redis_client().setex(redis_key, TOKEN_TTL_SECONDS, str(user_id))
 
     return token
 
@@ -71,10 +78,7 @@ def login_user(email: str, password: str):
     user = get_user_by_email(email)
 
     if not user or not verify_password(password, user.password_hash):
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid email or password"
-        )
+        raise UnauthorizedError("Invalid email or password")
 
     token = create_access_token(user.id, user.email)
 
@@ -83,7 +87,7 @@ def login_user(email: str, password: str):
         "token_type": "bearer",
         "user_id": user.id,
         "email": user.email,
-        "instance": INSTANCE_NAME
+        "instance": INSTANCE_NAME,
     }
 
 
@@ -95,39 +99,30 @@ def verify_token(token: str):
         token_id = payload.get("jti")
 
         if not token_id:
-            raise HTTPException(
-                status_code=status.HTTP_401_UNAUTHORIZED,
-                detail="Invalid token"
-            )
+            raise UnauthorizedError("Invalid token")
 
         redis_key = f"auth_token:{token_id}"
-        stored_user_id = redis_client.get(redis_key)
+        stored_user_id = get_redis_client().get(redis_key)
 
         if stored_user_id is None:
-            raise HTTPException(
-                status_code=status.HTTP_401_UNAUTHORIZED,
-                detail="Token is expired or logged out"
-            )
+            raise UnauthorizedError("Token is expired or logged out")
+
+        if stored_user_id != str(user_id):
+            raise UnauthorizedError("Token user mismatch")
 
         user = get_user_by_id(user_id)
         if not user:
-            raise HTTPException(
-                status_code=status.HTTP_401_UNAUTHORIZED,
-                detail="User not found"
-            )
+            raise UnauthorizedError("User not found")
 
         return {
             "valid": True,
             "user_id": user_id,
             "email": email,
-            "instance": INSTANCE_NAME
+            "instance": INSTANCE_NAME,
         }
 
-    except JWTError:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid or expired token"
-        )
+    except JWTError as error:
+        raise UnauthorizedError("Invalid or expired token") from error
 
 
 def logout_user(token: str):
@@ -137,19 +132,15 @@ def logout_user(token: str):
 
         if token_id:
             redis_key = f"auth_token:{token_id}"
-            redis_client.delete(redis_key)
+            get_redis_client().delete(redis_key)
 
         return {
             "message": "Logged out successfully",
-            "instance": INSTANCE_NAME
+            "instance": INSTANCE_NAME,
         }
 
-    except JWTError:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid token"
-        )
-    
+    except JWTError as error:
+        raise UnauthorizedError("Invalid token") from error
 
 
 def get_current_user_profile(token: str):
@@ -160,7 +151,7 @@ def get_current_user_profile(token: str):
         "id": user.id,
         "email": user.email,
         "username": user.username,
-        "instance": INSTANCE_NAME
+        "instance": INSTANCE_NAME,
     }
 
 
@@ -168,15 +159,12 @@ def get_user_by_username_service(username: str):
     user = get_user_by_username(username)
 
     if not user:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="User not found"
-        )
+        raise NotFoundError("User not found")
 
     return {
         "id": user.id,
         "email": user.email,
-        "username": user.username
+        "username": user.username,
     }
 
 
@@ -187,7 +175,22 @@ def get_all_users_service():
         {
             "id": user.id,
             "email": user.email,
-            "username": user.username
+            "username": user.username,
         }
         for user in users
     ]
+
+
+def get_health_dependencies():
+    dependencies = {
+        "postgres": get_database_health(),
+        "redis": "unavailable",
+    }
+
+    try:
+        get_redis_client().ping()
+        dependencies["redis"] = "ok"
+    except Exception:
+        dependencies["redis"] = "unavailable"
+
+    return dependencies

@@ -14,11 +14,13 @@ Main services:
 
 | Service | Responsibility |
 |---|---|
-| API Gateway | Routes requests to microservices |
+| API Gateway | Routes requests to discovered service instances and provides enriched read endpoints |
 | Auth Service | Registration, login, logout, JWT verification, user lookup |
 | Catalog Service | Movie catalog and search |
-| Reviews Service | Review creation and retrieval, Kafka producer |
-| Feed Service | Follow relationships, personal feed, Neo4j graph, Kafka consumer |
+| Reviews Service | Review creation and retrieval, PostgreSQL outbox |
+| Reviews Outbox Publisher | Publishes queued review events to Kafka |
+| Feed API | Follow relationships, personal feed, Neo4j graph |
+| Feed Consumer | Consumes Kafka review events into Neo4j |
 
 ---
 
@@ -44,6 +46,25 @@ Response:
 ```http
 GET /
 ```
+
+### Enriched feed
+
+```http
+GET /feed/enriched
+Authorization: Bearer <jwt-token>
+```
+
+Returns feed items enriched with `username` and `movie` data by composing Feed API, Auth Service, and Catalog Service responses.
+
+### Enriched reviews
+
+```http
+GET /reviews/enriched
+GET /reviews/enriched?item_id={movie_id}
+Authorization: Bearer <jwt-token>
+```
+
+Returns review items enriched with `username` and `movie` data.
 
 Response:
 
@@ -232,6 +253,7 @@ After logout, the same JWT can no longer be verified because its token identifie
 
 ```http
 GET /auth/users
+Authorization: Bearer <jwt-token>
 ```
 
 Response:
@@ -252,6 +274,7 @@ Response:
 
 ```http
 GET /auth/users/by-username/{username}
+Authorization: Bearer <jwt-token>
 ```
 
 Example:
@@ -298,7 +321,7 @@ Base path:
 /catalog
 ```
 
-The Catalog Service manages movies. Movie data is stored in MongoDB Replica Set.
+The Catalog Service manages movies. Movie data is stored in MongoDB Replica Set. Catalog endpoints require `Authorization: Bearer <jwt-token>` except `/catalog/health`.
 
 ---
 
@@ -458,7 +481,7 @@ Base path:
 /reviews
 ```
 
-The Reviews Service stores reviews in PostgreSQL and publishes `review.created` events to Kafka.
+The Reviews Service stores reviews in PostgreSQL and writes `review.created` events to an outbox table in the same transaction. A separate outbox publisher sends queued events to Kafka.
 
 ---
 
@@ -466,13 +489,13 @@ The Reviews Service stores reviews in PostgreSQL and publishes `review.created` 
 
 ```http
 POST /reviews
+Authorization: Bearer <jwt-token>
 ```
 
 Request:
 
 ```json
 {
-  "user_id": 1,
   "item_id": "movie-id",
   "text": "Great movie with strong atmosphere and story.",
   "rating": 9
@@ -488,15 +511,16 @@ Response:
   "item_id": "movie-id",
   "text": "Great movie with strong atmosphere and story.",
   "rating": 9,
-  "created_at": "2026-05-10T13:05:03.411227",
-  "event_published": true
+  "created_at": "2026-05-10T13:05:03.411227"
 }
 ```
 
 Notes:
 
 - `rating` must be between 1 and 10.
-- After saving the review, Reviews Service publishes a Kafka event to topic `review.created`.
+- The service uses the JWT user id.
+- Review storage and outbox event creation are atomic.
+- The outbox publisher later publishes the queued Kafka event to topic `review.created`.
 
 ---
 
@@ -504,6 +528,7 @@ Notes:
 
 ```http
 GET /reviews
+Authorization: Bearer <jwt-token>
 ```
 
 Response:
@@ -516,8 +541,7 @@ Response:
     "item_id": "movie-id",
     "text": "Great movie with strong atmosphere and story.",
     "rating": 9,
-    "created_at": "2026-05-10T13:05:03.411227",
-    "event_published": false
+    "created_at": "2026-05-10T13:05:03.411227"
   }
 ]
 ```
@@ -528,6 +552,7 @@ Response:
 
 ```http
 GET /reviews/item/{item_id}
+Authorization: Bearer <jwt-token>
 ```
 
 Response:
@@ -540,8 +565,7 @@ Response:
     "item_id": "movie-id",
     "text": "Great movie with strong atmosphere and story.",
     "rating": 9,
-    "created_at": "2026-05-10T13:05:03.411227",
-    "event_published": false
+    "created_at": "2026-05-10T13:05:03.411227"
   }
 ]
 ```
@@ -552,6 +576,7 @@ Response:
 
 ```http
 GET /reviews/user/{user_id}
+Authorization: Bearer <jwt-token>
 ```
 
 Response:
@@ -564,8 +589,7 @@ Response:
     "item_id": "movie-id",
     "text": "Great movie with strong atmosphere and story.",
     "rating": 9,
-    "created_at": "2026-05-10T13:05:03.411227",
-    "event_published": false
+    "created_at": "2026-05-10T13:05:03.411227"
   }
 ]
 ```
@@ -597,20 +621,21 @@ Base path:
 /feed
 ```
 
-The Feed Service manages follow relationships, consumes Kafka events, and stores social graph data in Neo4j.
+The Feed API manages follow relationships and reads social graph data from Neo4j. The Feed Consumer consumes Kafka events and writes review graph data to Neo4j.
 
 ---
 
 ## 6.1 Follow user
 
 ```http
-POST /feed/follow/{following_id}?follower_id={follower_id}
+POST /feed/follow/{following_id}
+Authorization: Bearer <jwt-token>
 ```
 
 Example:
 
 ```http
-POST /feed/follow/2?follower_id=1
+POST /feed/follow/2
 ```
 
 Response:
@@ -628,7 +653,8 @@ Response:
 ## 6.2 Get personal feed
 
 ```http
-GET /feed?user_id=1
+GET /feed
+Authorization: Bearer <jwt-token>
 ```
 
 Response:
@@ -651,7 +677,8 @@ Response:
 ## 6.3 Get recommendations
 
 ```http
-GET /feed/recommendations?user_id=1
+GET /feed/recommendations
+Authorization: Bearer <jwt-token>
 ```
 
 Response:
@@ -678,7 +705,7 @@ Response:
 ```json
 {
   "status": "ok",
-  "service": "feed-service"
+  "service": "feed-api"
 }
 ```
 
@@ -695,13 +722,13 @@ review.created
 ## Producer
 
 ```text
-Reviews Service
+Reviews Outbox Publisher
 ```
 
 ## Consumer
 
 ```text
-Feed Service
+Feed Consumer
 ```
 
 ## Event payload
@@ -724,14 +751,14 @@ Feed Service
 User creates review
         |
         v
-Reviews Service stores review in PostgreSQL
+Reviews Service stores review and outbox event in PostgreSQL
         |
         v
-Reviews Service publishes review.created event to Kafka
+Reviews Outbox Publisher publishes review.created event to Kafka
         |
         v
-Feed Service consumes event
+Feed Consumer consumes event
         |
         v
-Feed Service updates Neo4j graph
+Feed Consumer updates Neo4j graph and commits the Kafka offset
 ```

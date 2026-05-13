@@ -27,6 +27,8 @@ jobs:
       - name: Byte-compile all services
         run: |
           python -m compileall -q \
+            common \
+            config-server/app \
             api-gateway/app \
             auth-service/app \
             catalog-service/app \
@@ -42,6 +44,7 @@ jobs:
       matrix:
         service:
           - api-gateway
+          - config-server
           - auth-service
           - catalog-service
           - reviews-service
@@ -54,7 +57,8 @@ jobs:
       - name: Build ${{ matrix.service }}
         uses: docker/build-push-action@v6
         with:
-          context: ./${{ matrix.service }}
+          context: .
+          file: ./${{ matrix.service }}/Dockerfile
           push: false
           tags: ${{ matrix.service }}:ci
           cache-from: type=gha

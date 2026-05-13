@@ -259,13 +259,13 @@ review.created
 Check Feed Service logs:
 
 ```powershell
-docker logs feed-service --tail 100
+docker logs feed-consumer --tail 100
 ```
 
 Expected log:
 
 ```text
-[FEED] Consumed review.created event
+event=review_event_consumed
 ```
 
 Follow user:
@@ -273,13 +273,16 @@ Follow user:
 ```powershell
 Invoke-RestMethod `
   -Method Post `
-  -Uri "http://localhost:8000/feed/follow/2?follower_id=1"
+  -Uri "http://localhost:8000/feed/follow/2" `
+  -Headers @{Authorization = "Bearer $token"}
 ```
 
 Get feed:
 
 ```powershell
-Invoke-RestMethod "http://localhost:8000/feed?user_id=1"
+Invoke-RestMethod `
+  -Uri "http://localhost:8000/feed" `
+  -Headers @{Authorization = "Bearer $token"}
 ```
 
 ## 10. Neo4j Graph Demo

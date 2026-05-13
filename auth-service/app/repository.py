@@ -1,22 +1,30 @@
 import os
 from datetime import datetime
 
-from sqlalchemy import create_engine, Column, Integer, String, DateTime
-from sqlalchemy.orm import declarative_base, sessionmaker
-import time
-from sqlalchemy.exc import OperationalError
+from sqlalchemy import Column, DateTime, Integer, String
+from sqlalchemy.exc import IntegrityError
 
+from common.errors import ConflictError
+from common.logging_utils import configure_logging
+from common.sqlalchemy import (
+    create_base,
+    check_database,
+    create_db_engine,
+    create_session_factory,
+    init_schema_with_lock,
+    session_scope,
+)
 
 
 DATABASE_URL = os.getenv(
     "DATABASE_URL",
-    "postgresql://auth_user:auth_pass@auth-db:5432/auth_db"
+    "postgresql://auth_user:auth_pass@auth-db:5432/auth_db",
 )
 
-engine = create_engine(DATABASE_URL, pool_pre_ping=True)
-SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
-
-Base = declarative_base()
+engine = create_db_engine(DATABASE_URL)
+SessionLocal = create_session_factory(engine)
+Base = create_base()
+LOGGER = configure_logging("auth-service")
 
 
 class UserDB(Base):
@@ -24,76 +32,52 @@ class UserDB(Base):
 
     id = Column(Integer, primary_key=True, index=True)
     email = Column(String, unique=True, index=True, nullable=False)
-    username = Column(String, nullable=False)
+    username = Column(String, unique=True, index=True, nullable=False)
     password_hash = Column(String, nullable=False)
     created_at = Column(DateTime, default=datetime.utcnow)
 
 
-
 def init_db():
-    max_attempts = 15
+    init_schema_with_lock(engine, Base.metadata, 1001, "AUTH")
+    LOGGER.info("event=database_initialized")
 
-    for attempt in range(1, max_attempts + 1):
-        try:
-            with engine.begin() as connection:
-                connection.exec_driver_sql("SELECT pg_advisory_lock(1001)")
-                try:
-                    Base.metadata.create_all(bind=connection)
-                finally:
-                    connection.exec_driver_sql("SELECT pg_advisory_unlock(1001)")
 
-            print("[AUTH] Database initialized successfully")
-            return
+def get_database_health() -> str:
+    return check_database(engine)
 
-        except OperationalError as error:
-            print(f"[AUTH] Database not ready, attempt {attempt}/{max_attempts}")
-            time.sleep(2)
-
-    raise RuntimeError("Database is not available after retries")
 
 def create_user(email: str, username: str, password_hash: str) -> UserDB:
-    db = SessionLocal()
-    try:
+    with session_scope(SessionLocal) as db:
         user = UserDB(
             email=email,
             username=username,
-            password_hash=password_hash
+            password_hash=password_hash,
         )
         db.add(user)
-        db.commit()
-        db.refresh(user)
+        try:
+            db.commit()
+            db.refresh(user)
+        except IntegrityError as error:
+            db.rollback()
+            raise ConflictError("Email or username already exists") from error
         return user
-    finally:
-        db.close()
 
 
 def get_user_by_email(email: str):
-    db = SessionLocal()
-    try:
+    with session_scope(SessionLocal) as db:
         return db.query(UserDB).filter(UserDB.email == email).first()
-    finally:
-        db.close()
 
 
 def get_user_by_username(username: str):
-    db = SessionLocal()
-    try:
+    with session_scope(SessionLocal) as db:
         return db.query(UserDB).filter(UserDB.username == username).first()
-    finally:
-        db.close()
 
 
 def get_all_users():
-    db = SessionLocal()
-    try:
+    with session_scope(SessionLocal) as db:
         return db.query(UserDB).order_by(UserDB.id.asc()).all()
-    finally:
-        db.close()
 
-        
+
 def get_user_by_id(user_id: int):
-    db = SessionLocal()
-    try:
+    with session_scope(SessionLocal) as db:
         return db.query(UserDB).filter(UserDB.id == user_id).first()
-    finally:
-        db.close()

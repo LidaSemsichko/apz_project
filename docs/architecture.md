@@ -4,7 +4,7 @@
 
 Movie Review Platform is a microservice-based web application for reviewing movies and following user activity. Users can register, log in, browse a movie catalog, write reviews, follow other users, and view a personalized social feed.
 
-The system is built using independent microservices. Each microservice has its own data storage and follows a three-layer architecture:
+The system is built using independent microservices. Each microservice registers itself in Config Server, owns its storage, and follows a three-layer architecture:
 
 ```text
 API layer
@@ -24,11 +24,17 @@ Frontend / Streamlit UI
         v
 API Gateway
         |
+        v
+Config Server
+        |
         +------------------------+-------------------------+----------------------+
         |                        |                         |                      |
         v                        v                         v                      v
-Auth Service              Catalog Service           Reviews Service        Feed Service
-PostgreSQL + Redis        MongoDB Replica Set       PostgreSQL + Kafka     Neo4j + Kafka
+Auth Service              Catalog Service           Reviews Service        Feed API
+PostgreSQL + Redis        MongoDB Replica Set       PostgreSQL + Outbox    Neo4j
+                                                    |
+                                                    v
+                                             Outbox Publisher -> Kafka -> Feed Consumer -> Neo4j
 ```
 
 ---
@@ -69,7 +75,11 @@ Responsibilities:
 - Route `/auth/*` requests to Auth Service
 - Route `/catalog/*` requests to Catalog Service
 - Route `/reviews/*` requests to Reviews Service
-- Route `/feed/*` requests to Feed Service
+- Route `/feed/*` requests to Feed API
+- Resolve service instances through Config Server
+- Retry another active instance when a routed service instance is unavailable
+- Verify JWTs before forwarding protected requests
+- Provide enriched feed/review endpoints for UI composition
 - Hide internal service URLs from the frontend
 - Provide unified external API
 
@@ -87,7 +97,7 @@ Example routes:
 | `/auth/login` | Auth Service `/login` |
 | `/catalog` | Catalog Service `/catalog` |
 | `/reviews` | Reviews Service `/reviews` |
-| `/feed` | Feed Service `/feed` |
+| `/feed` | Feed API `/feed` |
 
 ---
 
@@ -169,7 +179,7 @@ mongo3 -> SECONDARY
 
 ## 3.5 Reviews Service
 
-The Reviews Service stores movie reviews and publishes review events.
+The Reviews Service stores movie reviews and writes pending `review.created` events to an outbox table in the same database transaction.
 
 Responsibilities:
 
@@ -178,7 +188,7 @@ Responsibilities:
 - Get all reviews
 - Get reviews by movie
 - Get reviews by user
-- Publish `review.created` events to Kafka
+- Queue `review.created` events in `outbox_events`
 
 Storage:
 
@@ -186,10 +196,10 @@ Storage:
 PostgreSQL
 ```
 
-Message broker:
+Outbox publisher:
 
 ```text
-Kafka
+reviews-outbox-publisher publishes queued events to Kafka
 ```
 
 Kafka topic:
@@ -200,17 +210,17 @@ review.created
 
 ---
 
-## 3.6 Feed Service
+## 3.6 Feed API And Feed Consumer
 
-The Feed Service handles social functionality.
+Feed is split into an HTTP API and a standalone Kafka consumer.
 
 Responsibilities:
 
 - Create follow relationships
-- Consume `review.created` events from Kafka
+- Feed API returns personalized feeds and recommendations
+- Feed Consumer consumes `review.created` events from Kafka
 - Store graph relationships in Neo4j
-- Return personalized user feed
-- Return basic recommendations
+- Commit Kafka offsets only after Neo4j writes succeed
 
 Storage:
 
@@ -231,7 +241,7 @@ Graph model:
 
 ## 3.7 Kafka
 
-Kafka is used for asynchronous communication between Reviews Service and Feed Service.
+Kafka is used for asynchronous communication between the Reviews Outbox Publisher and Feed Consumer.
 
 Topic:
 
@@ -248,13 +258,13 @@ Reviews Service
 Consumer:
 
 ```text
-Feed Service
+Feed Consumer
 ```
 
 Purpose:
 
 - Decouple review creation from feed update
-- Allow Reviews Service to work without directly calling Feed Service
+- Allow Reviews Service to work without directly calling Feed API or Feed Consumer
 - Demonstrate asynchronous message-based processing
 
 ---
@@ -300,7 +310,7 @@ Each microservice owns its own data.
 | Auth Service | Redis | Active JWT tokens |
 | Catalog Service | MongoDB Replica Set | Movies |
 | Reviews Service | PostgreSQL | Reviews |
-| Feed Service | Neo4j | Social graph |
+| Feed API / Feed Consumer | Neo4j | Social graph |
 
 This follows the database-per-service pattern.
 
@@ -332,7 +342,7 @@ Examples:
 Asynchronous communication is used for review event processing.
 
 ```text
-Reviews Service -> Kafka -> Feed Service
+Reviews Service -> outbox_events -> Reviews Outbox Publisher -> Kafka -> Feed Consumer
 ```
 
 Flow:
@@ -340,9 +350,9 @@ Flow:
 ```text
 1. User creates review.
 2. Reviews Service stores review in PostgreSQL.
-3. Reviews Service publishes review.created event to Kafka.
-4. Feed Service consumes the event.
-5. Feed Service updates Neo4j graph.
+3. Reviews Service writes a review.created outbox event in the same transaction.
+4. Reviews Outbox Publisher publishes the event to Kafka.
+5. Feed Consumer consumes the event and updates Neo4j, then commits the Kafka offset.
 ```
 
 ---
@@ -363,11 +373,11 @@ JWT token identifiers are stored in Redis. Because token state is stored in Redi
 Failover scenario:
 
 ```text
-1. User logs in through auth-service-1.
+1. User logs in through the API Gateway.
 2. Token id is stored in Redis.
 3. auth-service-1 is stopped.
-4. User verifies the same token through auth-service-2.
-5. auth-service-2 validates token using Redis.
+4. User verifies the same token through the API Gateway.
+5. The gateway resolves auth-service-2 through Config Server, and auth-service-2 validates token state using Redis.
 ```
 
 ---
@@ -415,7 +425,9 @@ auth-service-1
 auth-service-2
 catalog-service
 reviews-service
-feed-service
+feed-api
+feed-consumer
+reviews-outbox-publisher
 auth-db
 reviews-db
 redis
@@ -445,7 +457,8 @@ docker compose up -d --build
 | Auth Service 2 | 8002 |
 | Catalog Service | 8003 |
 | Reviews Service | 8004 |
-| Feed Service | 8005 |
+| Feed API | 8005 |
+| Config Server | 8010 |
 | Neo4j Browser | 7474 |
 | Neo4j Bolt | 7687 |
 | Redis | 6379 |

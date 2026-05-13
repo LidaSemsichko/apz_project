@@ -245,7 +245,6 @@ Request:
 
 ```json
 {
-  "user_id": 1,
   "item_id": "movie-id",
   "text": "Amazing movie.",
   "rating": 10
@@ -261,8 +260,7 @@ Response:
   "item_id": "movie-id",
   "text": "Amazing movie.",
   "rating": 10,
-  "created_at": "2026-05-10T13:05:03.411227",
-  "event_published": true
+  "created_at": "2026-05-10T13:05:03.411227"
 }
 ```
 
@@ -289,7 +287,7 @@ GET /reviews/user/{user_id}
 ### Follow User
 
 ```http
-POST /feed/follow/{following_id}?follower_id={follower_id}
+POST /feed/follow/{following_id}
 ```
 
 Response:
@@ -305,7 +303,7 @@ Response:
 ### Get Feed
 
 ```http
-GET /feed?user_id=1
+GET /feed
 ```
 
 Response:
@@ -326,7 +324,7 @@ Response:
 ### Get Recommendations
 
 ```http
-GET /feed/recommendations?user_id=1
+GET /feed/recommendations
 ```
 
 Response:

@@ -2,11 +2,11 @@ FROM python:3.11-slim
 
 WORKDIR /app
 
-COPY feed-service/requirements.txt .
+COPY config-server/requirements.txt .
 
 RUN pip install --no-cache-dir -r requirements.txt
 
 COPY common ./common
-COPY feed-service/app ./app
+COPY config-server/app ./app
 
 CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]

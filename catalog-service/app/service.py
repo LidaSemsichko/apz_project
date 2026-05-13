@@ -1,13 +1,13 @@
-from fastapi import HTTPException, status
-
+from common.errors import NotFoundError
 from app.repository import (
     create_movie,
+    delete_movie,
     get_all_movies,
+    get_database_health,
     get_movie_by_id,
     search_movies,
+    to_response,
     update_movie,
-    delete_movie,
-    to_response
 )
 
 
@@ -25,10 +25,7 @@ def get_movie_service(movie_id: str):
     movie = get_movie_by_id(movie_id)
 
     if not movie:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Movie not found"
-        )
+        raise NotFoundError("Movie not found")
 
     return to_response(movie)
 
@@ -42,10 +39,7 @@ def update_movie_service(movie_id: str, update_data: dict):
     movie = update_movie(movie_id, update_data)
 
     if not movie:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Movie not found"
-        )
+        raise NotFoundError("Movie not found")
 
     return to_response(movie)
 
@@ -54,12 +48,15 @@ def delete_movie_service(movie_id: str):
     deleted = delete_movie(movie_id)
 
     if not deleted:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Movie not found"
-        )
+        raise NotFoundError("Movie not found")
 
     return {
         "message": "Movie deleted successfully",
-        "movie_id": movie_id
+        "movie_id": movie_id,
+    }
+
+
+def get_health_dependencies():
+    return {
+        "mongo": get_database_health(),
     }

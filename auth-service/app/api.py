@@ -1,52 +1,39 @@
-from fastapi import APIRouter, Header, HTTPException, status
+from fastapi import APIRouter, Header
 
+from common.auth_client import extract_bearer_token
 from app.models import (
-    RegisterRequest,
-    LoginRequest,
     AuthResponse,
+    HealthResponse,
+    LoginRequest,
+    RegisterRequest,
     UserResponse,
     VerifyResponse,
-    HealthResponse
 )
 from app.service import (
-    register_user,
-    login_user,
-    verify_token,
-    logout_user,
     INSTANCE_NAME,
+    get_all_users_service,
     get_current_user_profile,
+    get_health_dependencies,
     get_user_by_username_service,
-    get_all_users_service
+    login_user,
+    logout_user,
+    register_user,
+    verify_token,
 )
 
 
 router = APIRouter()
 
 
-def extract_bearer_token(authorization: str | None) -> str:
-    if not authorization:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Authorization header is missing"
-        )
-
-    parts = authorization.split()
-
-    if len(parts) != 2 or parts[0].lower() != "bearer":
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid authorization header format"
-        )
-
-    return parts[1]
-
-
 @router.get("/health", response_model=HealthResponse)
 def health():
+    dependencies = get_health_dependencies()
+    status = "ok" if all(value == "ok" for value in dependencies.values()) else "degraded"
     return {
-        "status": "ok",
+        "status": status,
         "service": "auth-service",
-        "instance": INSTANCE_NAME
+        "instance": INSTANCE_NAME,
+        "dependencies": dependencies,
     }
 
 
@@ -55,14 +42,14 @@ def register(payload: RegisterRequest):
     user = register_user(
         email=payload.email,
         username=payload.username,
-        password=payload.password
+        password=payload.password,
     )
 
     return {
         "id": user.id,
         "email": user.email,
         "username": user.username,
-        "instance": INSTANCE_NAME
+        "instance": INSTANCE_NAME,
     }
 
 
@@ -70,7 +57,7 @@ def register(payload: RegisterRequest):
 def login(payload: LoginRequest):
     return login_user(
         email=payload.email,
-        password=payload.password
+        password=payload.password,
     )
 
 
@@ -93,10 +80,14 @@ def me(authorization: str | None = Header(default=None)):
 
 
 @router.get("/users")
-def users():
+def users(authorization: str | None = Header(default=None)):
+    token = extract_bearer_token(authorization)
+    verify_token(token)
     return get_all_users_service()
 
 
 @router.get("/users/by-username/{username}")
-def user_by_username(username: str):
+def user_by_username(username: str, authorization: str | None = Header(default=None)):
+    token = extract_bearer_token(authorization)
+    verify_token(token)
     return get_user_by_username_service(username)

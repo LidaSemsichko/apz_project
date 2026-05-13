@@ -1,28 +1,31 @@
+import json
 import os
-import time
 from datetime import datetime
 from typing import List
 
-from sqlalchemy import create_engine, Column, Integer, String, DateTime
-from sqlalchemy.exc import OperationalError
-from sqlalchemy.orm import declarative_base, sessionmaker
+from sqlalchemy import Column, DateTime, Integer, String, Text
+
+from common.logging_utils import configure_logging
+from common.sqlalchemy import (
+    check_database,
+    create_base,
+    create_db_engine,
+    create_session_factory,
+    init_schema_with_lock,
+    session_scope,
+)
 
 
 DATABASE_URL = os.getenv(
     "DATABASE_URL",
-    "postgresql://reviews_user:reviews_pass@reviews-db:5432/reviews_db"
+    "postgresql://reviews_user:reviews_pass@reviews-db:5432/reviews_db",
 )
+KAFKA_TOPIC = os.getenv("KAFKA_TOPIC", "review.created")
 
-engine = create_engine(DATABASE_URL, pool_pre_ping=True)
-
-SessionLocal = sessionmaker(
-    autocommit=False,
-    autoflush=False,
-    bind=engine,
-    expire_on_commit=False
-)
-
-Base = declarative_base()
+engine = create_db_engine(DATABASE_URL)
+SessionLocal = create_session_factory(engine)
+Base = create_base()
+LOGGER = configure_logging("reviews-service")
 
 
 class ReviewDB(Base):
@@ -36,80 +39,122 @@ class ReviewDB(Base):
     created_at = Column(DateTime, default=datetime.utcnow)
 
 
+class OutboxEventDB(Base):
+    __tablename__ = "outbox_events"
+
+    id = Column(Integer, primary_key=True, index=True)
+    topic = Column(String, nullable=False)
+    event_type = Column(String, index=True, nullable=False)
+    payload = Column(Text, nullable=False)
+    status = Column(String, index=True, nullable=False, default="pending")
+    attempts = Column(Integer, nullable=False, default=0)
+    last_error = Column(Text, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    published_at = Column(DateTime, nullable=True)
+
+
 def init_db():
-    max_attempts = 15
-
-    for attempt in range(1, max_attempts + 1):
-        try:
-            with engine.begin() as connection:
-                connection.exec_driver_sql("SELECT pg_advisory_lock(2001)")
-                try:
-                    Base.metadata.create_all(bind=connection)
-                finally:
-                    connection.exec_driver_sql("SELECT pg_advisory_unlock(2001)")
-
-            print("[REVIEWS] Database initialized successfully", flush=True)
-            return
-
-        except OperationalError:
-            print(f"[REVIEWS] Database not ready, attempt {attempt}/{max_attempts}", flush=True)
-            time.sleep(2)
-
-    raise RuntimeError("Reviews database is not available after retries")
+    init_schema_with_lock(engine, Base.metadata, 2001, "REVIEWS")
+    LOGGER.info("event=database_initialized")
 
 
-def create_review(user_id: int, item_id: str, text: str, rating: int) -> ReviewDB:
-    db = SessionLocal()
-    try:
+def get_database_health() -> str:
+    return check_database(engine)
+
+
+def create_review_with_outbox(user_id: int, item_id: str, text: str, rating: int) -> ReviewDB:
+    with session_scope(SessionLocal) as db:
+        created_at = datetime.utcnow()
         review = ReviewDB(
             user_id=user_id,
             item_id=item_id,
             text=text,
-            rating=rating
+            rating=rating,
+            created_at=created_at,
         )
 
         db.add(review)
+        db.flush()
+
+        event = {
+            "event_type": "review.created",
+            "review_id": review.id,
+            "user_id": review.user_id,
+            "item_id": review.item_id,
+            "text": review.text,
+            "rating": review.rating,
+            "created_at": review.created_at.isoformat(),
+        }
+        db.add(
+            OutboxEventDB(
+                topic=KAFKA_TOPIC,
+                event_type="review.created",
+                payload=json.dumps(event),
+                status="pending",
+            )
+        )
         db.commit()
         db.refresh(review)
-
         return review
-    finally:
-        db.close()
 
 
 def get_reviews_by_item(item_id: str) -> List[ReviewDB]:
-    db = SessionLocal()
-    try:
+    with session_scope(SessionLocal) as db:
         return (
             db.query(ReviewDB)
             .filter(ReviewDB.item_id == item_id)
             .order_by(ReviewDB.created_at.desc())
             .all()
         )
-    finally:
-        db.close()
 
 
 def get_reviews_by_user(user_id: int) -> List[ReviewDB]:
-    db = SessionLocal()
-    try:
+    with session_scope(SessionLocal) as db:
         return (
             db.query(ReviewDB)
             .filter(ReviewDB.user_id == user_id)
             .order_by(ReviewDB.created_at.desc())
             .all()
         )
-    finally:
-        db.close()
 
 
 def get_all_reviews() -> List[ReviewDB]:
-    db = SessionLocal()
-    try:
+    with session_scope(SessionLocal) as db:
         return (
             db.query(ReviewDB)
             .order_by(ReviewDB.created_at.desc())
             .all()
         )
-    finally:
-        db.close()
+
+
+def get_pending_outbox_events(limit: int = 20) -> List[OutboxEventDB]:
+    with session_scope(SessionLocal) as db:
+        return (
+            db.query(OutboxEventDB)
+            .filter(OutboxEventDB.status.in_(["pending", "failed"]))
+            .order_by(OutboxEventDB.created_at.asc())
+            .limit(limit)
+            .all()
+        )
+
+
+def mark_outbox_published(event_id: int) -> None:
+    with session_scope(SessionLocal) as db:
+        event = db.query(OutboxEventDB).filter(OutboxEventDB.id == event_id).first()
+        if not event:
+            return
+        event.status = "published"
+        event.published_at = datetime.utcnow()
+        event.last_error = None
+        db.commit()
+
+
+def mark_outbox_failed(event_id: int, error: str) -> None:
+    with session_scope(SessionLocal) as db:
+        event = db.query(OutboxEventDB).filter(OutboxEventDB.id == event_id).first()
+        if not event:
+            return
+        event.status = "failed"
+        event.attempts += 1
+        event.last_error = error[:2000]
+        db.commit()

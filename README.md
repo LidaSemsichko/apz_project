@@ -2,7 +2,7 @@
 
 Microservice-based movie review platform built for the APZ project.
 
-The system allows users to register, log in, browse a movie catalog, write reviews, follow other users, and view a personalized social feed. The project demonstrates microservice architecture, API Gateway, database-per-service pattern, JWT authentication, Redis-based token/session storage, MongoDB Replica Set, Kafka asynchronous messaging, Neo4j graph storage, and Docker Compose deployment.
+The system allows users to register, log in, browse a movie catalog, write reviews, follow other users, and view a personalized social feed. The project demonstrates microservice architecture, service discovery, API Gateway, database-per-service pattern, JWT authentication, Redis-based token/session storage, MongoDB Replica Set, Kafka asynchronous messaging with a transactional outbox, Neo4j graph storage, and Docker Compose deployment.
 
 ---
 
@@ -10,13 +10,14 @@ The system allows users to register, log in, browse a movie catalog, write revie
 
 - User registration and login
 - JWT authentication
+- Config Server service discovery
 - Logout with token invalidation
 - Redis storage for active JWT token identifiers
-- Two Auth Service instances for failover demonstration
+- Two Auth Service instances with gateway failover
 - Movie catalog with search by title, genre, and year
 - Movie reviews with rating from 1 to 10
-- Kafka event publishing after review creation
-- Kafka consumer in Feed Service
+- Transactional outbox publishing after review creation
+- Separate Feed API and Feed Consumer containers
 - Social graph in Neo4j
 - Follow users by username
 - Personalized feed with reviews from followed users
@@ -34,11 +35,17 @@ Frontend / Streamlit UI
         v
 API Gateway
         |
+        v
+Config Server (service discovery)
+        |
         +------------------------+-------------------------+----------------------+
         |                        |                         |                      |
         v                        v                         v                      v
-Auth Service              Catalog Service           Reviews Service        Feed Service
-PostgreSQL + Redis        MongoDB Replica Set       PostgreSQL + Kafka     Neo4j + Kafka
+Auth Service              Catalog Service           Reviews Service        Feed API
+PostgreSQL + Redis        MongoDB Replica Set       PostgreSQL + Outbox    Neo4j
+                                                    |
+                                                    v
+                                             Outbox Publisher -> Kafka -> Feed Consumer -> Neo4j
 ```
 
 ---
@@ -49,11 +56,14 @@ PostgreSQL + Redis        MongoDB Replica Set       PostgreSQL + Kafka     Neo4j
 |---|---|---|
 | Frontend | Streamlit UI | 8501 |
 | API Gateway | Single entry point for the frontend | 8000 |
+| Config Server | Service registry and discovery | 8010 |
 | Auth Service 1 | Authentication service instance 1 | 8001 |
 | Auth Service 2 | Authentication service instance 2 | 8002 |
 | Catalog Service | Movie catalog service | 8003 |
 | Reviews Service | Movie reviews service | 8004 |
-| Feed Service | Social feed service | 8005 |
+| Reviews Outbox Publisher | Publishes queued review events to Kafka | internal |
+| Feed API | Social feed HTTP API | 8005 |
+| Feed Consumer | Consumes review events into Neo4j | internal |
 | Neo4j Browser | Graph database UI | 7474 |
 | Kafka | Message broker | 9092 |
 | Redis | Token storage | 6379 |
@@ -72,7 +82,7 @@ PostgreSQL + Redis        MongoDB Replica Set       PostgreSQL + Kafka     Neo4j
 | PostgreSQL | Auth users and reviews |
 | Redis | Active JWT token identifiers |
 | MongoDB Replica Set | Movie catalog |
-| Kafka | Asynchronous `review.created` events |
+| Kafka | Asynchronous `review.created` events from the outbox publisher |
 | Neo4j | Social graph, follows, reviewed movies |
 | Docker Compose | Local deployment |
 
@@ -87,6 +97,14 @@ apz_project/
 │   ├── app/
 │   ├── Dockerfile
 │   └── requirements.txt
+│
+├── config-server/
+│   ├── app/
+│   ├── Dockerfile
+│   └── requirements.txt
+│
+├── common/
+│   └── shared service discovery, auth, retry, SQLAlchemy, health helpers
 │
 ├── auth-service/
 │   ├── app/
@@ -167,16 +185,19 @@ Check running containers:
 docker ps
 ```
 
-Expected main containers (16 long-running + 1 short-lived `mongo-init` that you may see as `Exited (0)`):
+Expected main containers (19 long-running + 1 short-lived `mongo-init` that you may see as `Exited (0)`):
 
 ```text
+config-server
 frontend
 api-gateway
 auth-service-1
 auth-service-2
 catalog-service
 reviews-service
-feed-service
+reviews-outbox-publisher
+feed-api
+feed-consumer
 auth-db
 reviews-db
 redis
@@ -208,6 +229,8 @@ Expected output:
 ```
 
 If you reset the stack with `docker compose down -v` (which wipes the Mongo volumes), `mongo-init` will run again on the next `docker compose up` and re-bootstrap the replica set automatically.
+
+Auth now enforces unique usernames at the database level. If you already have old local PostgreSQL volumes, run `docker compose down -v` before rebuilding so the clean Auth schema includes the username unique constraint.
 
 ---
 
@@ -246,6 +269,7 @@ Check API Gateway:
 
 ```powershell
 Invoke-RestMethod http://localhost:8000/health
+Invoke-RestMethod http://localhost:8010/health
 ```
 
 Check all services through API Gateway:
@@ -263,7 +287,11 @@ Expected response example:
 {
   "status": "ok",
   "service": "auth-service",
-  "instance": "auth-service-1"
+  "instance": "auth-service-1",
+  "dependencies": {
+    "postgres": "ok",
+    "redis": "ok"
+  }
 }
 ```
 
@@ -351,6 +379,7 @@ $movie = Invoke-RestMethod `
   -Method Post `
   -Uri http://localhost:8000/catalog `
   -ContentType "application/json" `
+  -Headers @{Authorization = "Bearer $token"} `
   -Body '{
     "title": "Interstellar",
     "description": "A science fiction film about space, time, and human survival.",
@@ -367,7 +396,6 @@ $movieId = $movie.id
 
 ```powershell
 $reviewBody = @{
-  user_id = 1
   item_id = $movieId
   text = "Amazing movie with strong emotional and scientific themes."
   rating = 10
@@ -377,6 +405,7 @@ Invoke-RestMethod `
   -Method Post `
   -Uri http://localhost:8000/reviews `
   -ContentType "application/json" `
+  -Headers @{Authorization = "Bearer $token"} `
   -Body $reviewBody
 ```
 
@@ -385,13 +414,16 @@ Invoke-RestMethod `
 ```powershell
 Invoke-RestMethod `
   -Method Post `
-  -Uri "http://localhost:8000/feed/follow/2?follower_id=1"
+  -Uri "http://localhost:8000/feed/follow/2" `
+  -Headers @{Authorization = "Bearer $token"}
 ```
 
 ### Get feed
 
 ```powershell
-Invoke-RestMethod "http://localhost:8000/feed?user_id=1"
+Invoke-RestMethod `
+  -Uri "http://localhost:8000/feed/enriched" `
+  -Headers @{Authorization = "Bearer $token"}
 ```
 
 ---
@@ -404,10 +436,16 @@ When a review is created:
 Reviews Service
         |
         v
+PostgreSQL reviews + outbox_events
+        |
+        v
+Reviews Outbox Publisher
+        |
+        v
 Kafka topic: review.created
         |
         v
-Feed Service
+Feed Consumer
         |
         v
 Neo4j graph update
@@ -416,25 +454,25 @@ Neo4j graph update
 Check Reviews Service logs:
 
 ```powershell
-docker logs reviews-service --tail 100
+docker logs reviews-outbox-publisher --tail 100
 ```
 
 Expected log:
 
 ```text
-[REVIEWS] Published event to Kafka
+[REVIEWS-OUTBOX] Published event
 ```
 
-Check Feed Service logs:
+Check Feed Consumer logs:
 
 ```powershell
-docker logs feed-service --tail 100
+docker logs feed-consumer --tail 100
 ```
 
 Expected log:
 
 ```text
-[FEED] Consumed review.created event
+[FEED-CONSUMER] Consumed review.created event
 ```
 
 List Kafka topics:
@@ -495,24 +533,24 @@ auth-service-1
 auth-service-2
 ```
 
-Login through `auth-service-1`:
+Login through the API Gateway:
 
 ```powershell
 $login = Invoke-RestMethod `
   -Method Post `
-  -Uri http://localhost:8001/login `
+  -Uri http://localhost:8000/auth/login `
   -ContentType "application/json" `
   -Body '{"email":"test@example.com","password":"123456"}'
 
 $token = $login.access_token
 ```
 
-Verify through `auth-service-1`:
+Verify through the API Gateway:
 
 ```powershell
 Invoke-RestMethod `
   -Method Get `
-  -Uri http://localhost:8001/verify `
+  -Uri http://localhost:8000/auth/verify `
   -Headers @{Authorization = "Bearer $token"}
 ```
 
@@ -522,12 +560,12 @@ Stop the first instance:
 docker stop auth-service-1
 ```
 
-Verify the same token through `auth-service-2`:
+Verify the same token through the API Gateway. The gateway resolves the remaining Auth instance through Config Server:
 
 ```powershell
 Invoke-RestMethod `
   -Method Get `
-  -Uri http://localhost:8002/verify `
+  -Uri http://localhost:8000/auth/verify `
   -Headers @{Authorization = "Bearer $token"}
 ```
 
@@ -625,7 +663,7 @@ docs/use-cases.md
 
 | Requirement | Implementation |
 |---|---|
-| Microservice architecture | Auth, Catalog, Reviews, Feed, API Gateway |
+| Microservice architecture | Auth, Catalog, Reviews, Feed API/Consumer, API Gateway, Config Server |
 | Authentication microservice | Auth Service |
 | Login/logout | Implemented |
 | Password hash | bcrypt hash in PostgreSQL |
@@ -635,7 +673,7 @@ docs/use-cases.md
 | Separate database per service | PostgreSQL, MongoDB, Neo4j |
 | NoSQL replication | MongoDB Replica Set |
 | Message queue | Kafka |
-| Async processing | Reviews Service to Kafka to Feed Service |
+| Async processing | Reviews outbox publisher to Kafka to Feed Consumer |
 | API Gateway | Implemented |
 | Docker Compose | Implemented |
 | Working UI | Streamlit frontend |

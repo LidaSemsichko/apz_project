@@ -2,7 +2,7 @@
 
 ## 1. Overview
 
-The Movie Review Platform uses Kafka for asynchronous communication between Reviews Service and Feed Service.
+The Movie Review Platform uses Kafka for asynchronous communication between the Reviews outbox publisher and Feed Consumer.
 
 The main event is created when a user writes a review.
 
@@ -15,13 +15,13 @@ review.created
 ## 3. Producer
 
 ```text
-Reviews Service
+Reviews Outbox Publisher
 ```
 
 ## 4. Consumer
 
 ```text
-Feed Service
+Feed Consumer
 ```
 
 ## 5. Event Payload
@@ -55,20 +55,20 @@ Feed Service
 ```text
 User writes review
   ↓
-Reviews Service stores review in PostgreSQL
+Reviews Service stores review in PostgreSQL and writes an outbox event in the same transaction
   ↓
-Reviews Service creates review.created event
+Reviews Outbox Publisher reads the pending outbox event
   ↓
 Kafka stores event in review.created topic
   ↓
-Feed Service consumes event
+Feed Consumer consumes event
   ↓
-Feed Service writes graph data to Neo4j
+Feed Consumer writes graph data to Neo4j and commits the Kafka offset
 ```
 
-## 8. Feed Service Processing Rules
+## 8. Feed Consumer Processing Rules
 
-When Feed Service receives `review.created`, it must:
+When Feed Consumer receives `review.created`, it must:
 
 1. Create or update User node.
 2. Create or update Item node.
@@ -81,18 +81,20 @@ When Feed Service receives `review.created`, it must:
 
 Neo4j operations use `MERGE`, so consuming the same event again should not create duplicate User, Item, or Review nodes with the same ids.
 
+The consumer uses manual Kafka offset commits. It commits an offset only after the Neo4j write succeeds. If Neo4j write or offset commit fails, the process exits/restarts and Kafka redelivers the uncommitted message.
+
 ## 10. Verification
 
-Reviews Service logs should contain:
+Reviews Outbox Publisher logs should contain:
 
 ```text
-[REVIEWS] Published event to Kafka
+[REVIEWS-OUTBOX] Published event
 ```
 
-Feed Service logs should contain:
+Feed Consumer logs should contain:
 
 ```text
-[FEED] Consumed review.created event
+[FEED-CONSUMER] Consumed review.created event
 ```
 
 Kafka topic check:

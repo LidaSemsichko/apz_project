@@ -173,7 +173,7 @@ Implementation:
 
 - Feed Service
 - Neo4j query
-- `/feed?user_id=...`
+- `/feed`
 
 Verification:
 
