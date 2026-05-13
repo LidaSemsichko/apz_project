@@ -206,9 +206,111 @@ def css():
             color: #fca5a5;
         }
 
-        .stButton > button {
+        .stButton > button,
+        .stDownloadButton > button,
+        .stFormSubmitButton > button {
             border-radius: 14px;
             font-weight: 700;
+            background: linear-gradient(135deg, #6d28d9, #8b5cf6);
+            color: #ffffff !important;
+            border: 1px solid rgba(167, 139, 250, 0.55);
+            box-shadow: 0 2px 6px rgba(15, 23, 42, 0.35);
+            transition: filter 0.15s ease, transform 0.05s ease;
+        }
+
+        .stButton > button:hover,
+        .stDownloadButton > button:hover,
+        .stFormSubmitButton > button:hover {
+            filter: brightness(1.12);
+            border-color: rgba(216, 180, 254, 0.85);
+            color: #ffffff !important;
+        }
+
+        .stButton > button:active,
+        .stDownloadButton > button:active,
+        .stFormSubmitButton > button:active {
+            transform: translateY(1px);
+            filter: brightness(0.95);
+        }
+
+        .stButton > button:focus,
+        .stDownloadButton > button:focus,
+        .stFormSubmitButton > button:focus {
+            outline: 2px solid #c4b5fd;
+            outline-offset: 2px;
+        }
+
+        .stButton > button:disabled,
+        .stDownloadButton > button:disabled,
+        .stFormSubmitButton > button:disabled {
+            background: #1f2937;
+            color: #9ca3af !important;
+            border-color: rgba(148, 163, 184, 0.25);
+            box-shadow: none;
+            cursor: not-allowed;
+        }
+
+        /* Make text inputs, selectboxes, and textareas readable on the dark bg */
+        .stTextInput input,
+        .stNumberInput input,
+        .stTextArea textarea,
+        .stSelectbox div[data-baseweb="select"] > div {
+            background: rgba(15, 23, 42, 0.9) !important;
+            color: #f8fafc !important;
+            border: 1px solid rgba(148, 163, 184, 0.25) !important;
+        }
+
+        /* Widget labels ("Search by title", "Choose movie", "Rating", etc.) —
+           Streamlit's default near-grey is unreadable on the dark app bg. */
+        .stTextInput label,
+        .stNumberInput label,
+        .stTextArea label,
+        .stSelectbox label,
+        .stMultiSelect label,
+        .stSlider label,
+        .stRadio label,
+        .stCheckbox label,
+        .stDateInput label,
+        .stTimeInput label,
+        .stFileUploader label,
+        div[data-testid="stWidgetLabel"],
+        div[data-testid="stWidgetLabel"] p,
+        label[data-testid="stWidgetLabel"] {
+            color: #e2e8f0 !important;
+            font-weight: 600 !important;
+            font-size: 14px !important;
+            letter-spacing: 0.01em;
+            opacity: 1 !important;
+        }
+
+        /* Placeholder text inside inputs */
+        .stTextInput input::placeholder,
+        .stNumberInput input::placeholder,
+        .stTextArea textarea::placeholder {
+            color: #64748b !important;
+        }
+
+        /* Caption text (st.caption) */
+        div[data-testid="stCaptionContainer"],
+        .stCaption {
+            color: #cbd5e1 !important;
+        }
+
+        /* Slider tick / value labels */
+        .stSlider [data-baseweb="slider"] div[role="slider"] {
+            background: #8b5cf6 !important;
+        }
+        .stSlider [data-baseweb="slider"] [data-testid="stTickBar"] {
+            color: #cbd5e1 !important;
+        }
+
+        /* Tab labels: keep them visible without hover */
+        .stTabs [data-baseweb="tab-list"] button {
+            color: #cbd5e1;
+        }
+        .stTabs [data-baseweb="tab-list"] button[aria-selected="true"] {
+            color: #ffffff;
+            border-bottom-color: #8b5cf6 !important;
         }
 
         div[data-testid="stSidebar"] {
@@ -875,7 +977,9 @@ def page_feed():
         if user["id"] != st.session_state.user["id"]
     ]
 
-    tab_follow, tab_feed = st.tabs(["Follow people", "My feed"])
+    tab_follow, tab_feed, tab_recs = st.tabs(
+        ["Follow people", "My feed", "Recommendations"]
+    )
 
     with tab_follow:
         if not usernames:
@@ -912,6 +1016,63 @@ def page_feed():
                     movies_map=movies_map,
                     show_open_button=True,
                 )
+
+        except Exception as error:
+            st.error(error)
+
+    with tab_recs:
+        st.caption(
+            "Suggestions based on what users with overlapping taste have reviewed. "
+            "Computed in Neo4j with a collaborative-filtering Cypher query: people "
+            "who reviewed the same movies as you, then what else they reviewed."
+        )
+
+        if st.button("Refresh recommendations", use_container_width=True):
+            st.rerun()
+
+        try:
+            recommendations = get("/feed/recommendations")
+
+            if not recommendations:
+                st.info(
+                    "No recommendations yet. Write reviews for a few movies first — "
+                    "the engine needs your reviews to find users who share your taste."
+                )
+
+            for rec in recommendations:
+                item_id = rec.get("item_id")
+                score = rec.get("score", 0)
+                movie = movies_map.get(item_id)
+
+                title = movie["title"] if movie else f"Movie {item_id}"
+                year = movie.get("year") if movie else None
+                director = movie.get("director") if movie else None
+                description = movie.get("description") if movie else None
+
+                user_word = "user" if score == 1 else "users"
+
+                st.markdown(
+                    f"""
+                    <div class="review">
+                        <h3>{title} {f"({year})" if year else ""}</h3>
+                        {f"<p class='muted'>Directed by {director}</p>" if director else ""}
+                        {f"<p>{description}</p>" if description else ""}
+                        <p class="muted">
+                            Recommended by <b>{score}</b> {user_word} who share your taste
+                        </p>
+                    </div>
+                    """,
+                    unsafe_allow_html=True,
+                )
+
+                if movie and st.button(
+                    f"Open reviews for {title}",
+                    key=f"open_rec_{item_id}",
+                    use_container_width=True,
+                ):
+                    st.session_state.selected_movie = movie
+                    st.session_state.nav_page = "Reviews"
+                    st.rerun()
 
         except Exception as error:
             st.error(error)
