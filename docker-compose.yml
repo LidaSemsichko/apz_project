@@ -5,11 +5,16 @@ services:
     ports:
       - "8000:8000"
     depends_on:
-      - auth-service-1
-      - auth-service-2
-      - catalog-service
-      - reviews-service
-      - feed-service
+      auth-service-1:
+        condition: service_started
+      auth-service-2:
+        condition: service_started
+      catalog-service:
+        condition: service_started
+      reviews-service:
+        condition: service_started
+      feed-service:
+        condition: service_started
     environment:
       AUTH_SERVICE_URL: http://auth-service-1:8000
       CATALOG_SERVICE_URL: http://catalog-service:8000
@@ -25,7 +30,8 @@ services:
     ports:
       - "8501:8501"
     depends_on:
-      - api-gateway
+      api-gateway:
+        condition: service_started
     environment:
       API_GATEWAY_URL: http://api-gateway:8000
     networks:
@@ -38,8 +44,10 @@ services:
     ports:
       - "8001:8000"
     depends_on:
-      - auth-db
-      - redis
+      auth-db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
     environment:
       DATABASE_URL: postgresql://auth_user:auth_pass@auth-db:5432/auth_db
       REDIS_URL: redis://redis:6379/0
@@ -56,8 +64,10 @@ services:
     ports:
       - "8002:8000"
     depends_on:
-      - auth-db
-      - redis
+      auth-db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
     environment:
       DATABASE_URL: postgresql://auth_user:auth_pass@auth-db:5432/auth_db
       REDIS_URL: redis://redis:6379/0
@@ -74,9 +84,8 @@ services:
     ports:
       - "8003:8000"
     depends_on:
-      - mongo1
-      - mongo2
-      - mongo3
+      mongo-init:
+        condition: service_completed_successfully
     environment:
       MONGO_URL: mongodb://mongo1:27017,mongo2:27017,mongo3:27017/catalog_db?replicaSet=rs0
     networks:
@@ -89,8 +98,10 @@ services:
     ports:
       - "8004:8000"
     depends_on:
-      - reviews-db
-      - kafka
+      reviews-db:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
     environment:
       DATABASE_URL: postgresql://reviews_user:reviews_pass@reviews-db:5432/reviews_db
       KAFKA_BOOTSTRAP_SERVERS: kafka:9092
@@ -105,8 +116,10 @@ services:
     ports:
       - "8005:8000"
     depends_on:
-      - neo4j
-      - kafka
+      neo4j:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
     environment:
       NEO4J_URI: bolt://neo4j:7687
       NEO4J_USER: neo4j
@@ -128,6 +141,12 @@ services:
       - "5433:5432"
     volumes:
       - auth_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U auth_user -d auth_db"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
     networks:
       - app-network
     restart: unless-stopped
@@ -143,6 +162,12 @@ services:
       - "5434:5432"
     volumes:
       - reviews_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U reviews_user -d reviews_db"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
     networks:
       - app-network
     restart: unless-stopped
@@ -152,6 +177,12 @@ services:
     container_name: redis
     ports:
       - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 5s
     networks:
       - app-network
     restart: unless-stopped
@@ -164,6 +195,12 @@ services:
       - "27017:27017"
     volumes:
       - mongo1_data:/data/db
+    healthcheck:
+      test: ["CMD", "mongosh", "--quiet", "--eval", "db.adminCommand('ping').ok"]
+      interval: 5s
+      timeout: 10s
+      retries: 20
+      start_period: 15s
     networks:
       - app-network
     restart: unless-stopped
@@ -176,6 +213,12 @@ services:
       - "27018:27017"
     volumes:
       - mongo2_data:/data/db
+    healthcheck:
+      test: ["CMD", "mongosh", "--quiet", "--eval", "db.adminCommand('ping').ok"]
+      interval: 5s
+      timeout: 10s
+      retries: 20
+      start_period: 15s
     networks:
       - app-network
     restart: unless-stopped
@@ -188,9 +231,61 @@ services:
       - "27019:27017"
     volumes:
       - mongo3_data:/data/db
+    healthcheck:
+      test: ["CMD", "mongosh", "--quiet", "--eval", "db.adminCommand('ping').ok"]
+      interval: 5s
+      timeout: 10s
+      retries: 20
+      start_period: 15s
     networks:
       - app-network
     restart: unless-stopped
+
+  mongo-init:
+    image: mongo:7
+    container_name: mongo-init
+    depends_on:
+      mongo1:
+        condition: service_healthy
+      mongo2:
+        condition: service_healthy
+      mongo3:
+        condition: service_healthy
+    restart: "no"
+    entrypoint: ["bash", "-c"]
+    command:
+      - |
+        set -e
+        echo "[mongo-init] Checking replica set status..."
+        STATUS=$$(mongosh --quiet --host mongo1:27017 --eval "try { rs.status().ok } catch (e) { print(0) }")
+        if [ "$$STATUS" = "1" ]; then
+          echo "[mongo-init] Replica set already initialised - nothing to do."
+          exit 0
+        fi
+        echo "[mongo-init] Initialising replica set rs0..."
+        mongosh --quiet --host mongo1:27017 --eval '
+          rs.initiate({
+            _id: "rs0",
+            members: [
+              { _id: 0, host: "mongo1:27017" },
+              { _id: 1, host: "mongo2:27017" },
+              { _id: 2, host: "mongo3:27017" }
+            ]
+          })
+        '
+        echo "[mongo-init] Waiting for PRIMARY election..."
+        for i in $$(seq 1 30); do
+          PRIMARY=$$(mongosh --quiet --host mongo1:27017 --eval "try { rs.status().members.filter(function(m){return m.stateStr==='PRIMARY'}).length } catch (e) { print(0) }")
+          if [ "$$PRIMARY" = "1" ]; then
+            echo "[mongo-init] PRIMARY elected. Replica set is ready."
+            exit 0
+          fi
+          sleep 2
+        done
+        echo "[mongo-init] ERROR: no PRIMARY after 60s"
+        exit 1
+    networks:
+      - app-network
 
   zookeeper:
     image: confluentinc/cp-zookeeper:7.6.1
@@ -198,6 +293,13 @@ services:
     environment:
       ZOOKEEPER_CLIENT_PORT: 2181
       ZOOKEEPER_TICK_TIME: 2000
+      KAFKA_OPTS: "-Dzookeeper.4lw.commands.whitelist=ruok,srvr"
+    healthcheck:
+      test: ["CMD-SHELL", "echo ruok | nc -w 2 localhost 2181 | grep -q imok"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
     networks:
       - app-network
     restart: unless-stopped
@@ -206,7 +308,8 @@ services:
     image: confluentinc/cp-kafka:7.6.1
     container_name: kafka
     depends_on:
-      - zookeeper
+      zookeeper:
+        condition: service_healthy
     ports:
       - "9092:9092"
       - "29092:29092"
@@ -218,6 +321,12 @@ services:
       KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
       KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
       KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
+    healthcheck:
+      test: ["CMD-SHELL", "kafka-topics --bootstrap-server localhost:9092 --list >/dev/null 2>&1"]
+      interval: 10s
+      timeout: 10s
+      retries: 15
+      start_period: 30s
     networks:
       - app-network
     restart: unless-stopped
@@ -232,6 +341,12 @@ services:
       NEO4J_AUTH: neo4j/password123
     volumes:
       - neo4j_data:/data
+    healthcheck:
+      test: ["CMD-SHELL", "wget --no-verbose --tries=1 --spider http://localhost:7474 || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 15
+      start_period: 20s
     networks:
       - app-network
     restart: unless-stopped

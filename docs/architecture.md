@@ -374,7 +374,7 @@ Failover scenario:
 
 ## 6.2 MongoDB Replica Set
 
-The Catalog Service uses MongoDB Replica Set.
+The Catalog Service uses a three-node MongoDB Replica Set (`mongo1`, `mongo2`, `mongo3`, all running with `--replSet rs0`). The replica set is bootstrapped automatically on first start by a one-shot `mongo-init` service defined in `docker-compose.yml`, which is idempotent — on subsequent starts it detects that `rs0` is already initialised and exits without changes. `catalog-service` declares `depends_on: mongo-init: service_completed_successfully`, so it never starts until the replica set has a PRIMARY elected.
 
 Benefits:
 
@@ -382,11 +382,12 @@ Benefits:
 - Primary-secondary architecture
 - Automatic primary election when quorum is available
 - Improved fault tolerance for catalog data
+- Automated one-command bootstrap (no manual `rs.initiate()` step)
 
-Replica set check:
+Replica set check from the host:
 
-```javascript
-rs.status().members.map(m => ({ name: m.name, state: m.stateStr }))
+```powershell
+docker exec -it mongo1 mongosh --quiet --eval "rs.status().members.map(m => m.name + ' ' + m.stateStr)"
 ```
 
 Expected result:

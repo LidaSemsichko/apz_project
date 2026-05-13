@@ -277,6 +277,22 @@ one PRIMARY
 two SECONDARY
 ```
 
+The replica set is bootstrapped automatically by a one-shot `mongo-init` service in `docker-compose.yml`. The init script is idempotent: it checks `rs.status()` first and exits cleanly when the replica set is already initialised, so it is safe to re-run on every `docker compose up`. `catalog-service` depends on `mongo-init` finishing successfully before it starts, eliminating the manual `rs.initiate()` step.
+
+### Compose Healthchecks
+
+All stateful services (`auth-db`, `reviews-db`, `redis`, `mongo1`, `mongo2`, `mongo3`, `zookeeper`, `kafka`, `neo4j`) declare a `healthcheck:` block. Application services use `depends_on: condition: service_healthy` so they only start after their dependencies are actually accepting connections, not just after the container has started.
+
+### Continuous Integration
+
+A GitHub Actions workflow (`.github/workflows/ci.yml`) runs on every push and pull request to `main`:
+
+```text
+- docker compose config (lint)
+- python -m compileall (syntax check for every service)
+- docker build for api-gateway, auth, catalog, reviews, feed, frontend
+```
+
 ## 7. Implementation Steps
 
 1. Create Docker Compose infrastructure
@@ -284,7 +300,7 @@ two SECONDARY
 3. Add Redis token storage
 4. Add second Auth instance
 5. Implement Catalog Service
-6. Configure MongoDB Replica Set
+6. Configure MongoDB Replica Set (auto-bootstrap via `mongo-init`)
 7. Implement Reviews Service
 8. Add Kafka producer
 9. Implement Feed Service
@@ -293,8 +309,10 @@ two SECONDARY
 12. Implement API Gateway
 13. Implement Streamlit UI
 14. Add demo data seeding
-15. Add documentation
-16. Test all demo scenarios
+15. Add compose healthchecks
+16. Add CI workflow (`.github/workflows/ci.yml`)
+17. Add documentation
+18. Test all demo scenarios
 
 ## 8. Validation Plan
 

@@ -14,7 +14,7 @@ Check running containers:
 docker ps
 ```
 
-Expected main containers:
+Expected main containers (16 long-running plus the one-shot `mongo-init` which exits with code 0 after bootstrapping the replica set):
 
 ```text
 frontend
@@ -30,59 +30,29 @@ redis
 mongo1
 mongo2
 mongo3
+mongo-init        (one-shot — Exited (0) is the success state)
 zookeeper
 kafka
 neo4j
 ```
 
-## 2. Initialize MongoDB Replica Set
+## 2. Verify MongoDB Replica Set
 
-Open Mongo shell:
+The replica set is initialised automatically on first start by the `mongo-init` container. You do not need to run `rs.initiate()` by hand.
 
-```powershell
-docker exec -it mongo1 mongosh
-```
-
-Initialize the replica set:
-
-```javascript
-rs.initiate({
-  _id: "rs0",
-  members: [
-    { _id: 0, host: "mongo1:27017" },
-    { _id: 1, host: "mongo2:27017" },
-    { _id: 2, host: "mongo3:27017" }
-  ]
-})
-```
-
-Check status:
-
-```javascript
-rs.status().members.map(m => ({ name: m.name, state: m.stateStr }))
-```
-
-Expected result:
-
-```javascript
-[
-  { name: 'mongo1:27017', state: 'PRIMARY' },
-  { name: 'mongo2:27017', state: 'SECONDARY' },
-  { name: 'mongo3:27017', state: 'SECONDARY' }
-]
-```
-
-Exit shell:
-
-```javascript
-exit
-```
-
-If Catalog Service was waiting for MongoDB, restart it:
+Confirm the replica set is healthy:
 
 ```powershell
-docker restart catalog-service
+docker exec -it mongo1 mongosh --quiet --eval "rs.status().members.map(m => m.name + ' ' + m.stateStr)"
 ```
+
+Expected output:
+
+```text
+[ 'mongo1:27017 PRIMARY', 'mongo2:27017 SECONDARY', 'mongo3:27017 SECONDARY' ]
+```
+
+If you ever wipe the Mongo volumes (`docker compose down -v`), the `mongo-init` container will re-run automatically on the next `docker compose up` and re-bootstrap the replica set.
 
 ## 3. Open the UI
 

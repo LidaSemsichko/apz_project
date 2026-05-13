@@ -21,6 +21,9 @@
 - [x] Add Neo4j
 - [x] Add Docker network
 - [x] Add volumes
+- [x] Add healthchecks for Postgres, Redis, Mongo, Zookeeper, Kafka, Neo4j
+- [x] Add `mongo-init` one-shot service for automatic `rs.initiate()`
+- [x] Wire `catalog-service` to wait on `mongo-init: service_completed_successfully`
 
 ## Phase 3: Auth Service
 
@@ -134,9 +137,15 @@
 - [x] Test UI
 - [x] Test Seed Demo World
 
+## Phase 11: CI
+
+- [x] Add `.github/workflows/ci.yml`
+- [x] CI job: validate `docker-compose.yml` syntax (`docker compose config`)
+- [x] CI job: Python `compileall` across all services
+- [x] CI job: matrix build of every service's Docker image
+
 ## Optional Future Tasks
 
-- [ ] Add GitHub Actions CI
 - [ ] Add screenshots to README
 - [ ] Add review editing
 - [ ] Add review deletion

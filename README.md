@@ -147,10 +147,10 @@ No local Python environment is required because all services run inside Docker c
 
 ## How to Run
 
-From the project root:
+From the project root (substitute your own checkout path):
 
 ```powershell
-cd C:\Users\user\Desktop\apz_project
+cd <path to apz_project>
 ```
 
 Build and start all containers:
@@ -159,13 +159,15 @@ Build and start all containers:
 docker compose up -d --build
 ```
 
+That single command brings the whole stack up. Compose now waits on healthchecks for Postgres, Redis, MongoDB, Kafka, and Neo4j, and a one-shot `mongo-init` service runs `rs.initiate()` automatically the first time it starts. `catalog-service` only starts after `mongo-init` has exited successfully, so you no longer need to open a Mongo shell by hand.
+
 Check running containers:
 
 ```powershell
 docker ps
 ```
 
-Expected main containers:
+Expected main containers (16 long-running + 1 short-lived `mongo-init` that you may see as `Exited (0)`):
 
 ```text
 frontend
@@ -181,6 +183,7 @@ redis
 mongo1
 mongo2
 mongo3
+mongo-init        (one-shot — exits 0 after rs.initiate)
 zookeeper
 kafka
 neo4j
@@ -188,56 +191,23 @@ neo4j
 
 ---
 
-## Initialize MongoDB Replica Set
+## MongoDB Replica Set
 
-After the first startup, initialize MongoDB Replica Set.
+The replica set is initialised automatically on first start by the `mongo-init` service (see `docker-compose.yml`). It is idempotent — on subsequent starts it detects that `rs0` already exists and exits without changes.
 
-Open Mongo shell:
-
-```powershell
-docker exec -it mongo1 mongosh
-```
-
-Run:
-
-```javascript
-rs.initiate({
-  _id: "rs0",
-  members: [
-    { _id: 0, host: "mongo1:27017" },
-    { _id: 1, host: "mongo2:27017" },
-    { _id: 2, host: "mongo3:27017" }
-  ]
-})
-```
-
-Wait 10–20 seconds and check status:
-
-```javascript
-rs.status().members.map(m => ({ name: m.name, state: m.stateStr }))
-```
-
-Expected result:
-
-```javascript
-[
-  { name: 'mongo1:27017', state: 'PRIMARY' },
-  { name: 'mongo2:27017', state: 'SECONDARY' },
-  { name: 'mongo3:27017', state: 'SECONDARY' }
-]
-```
-
-Exit:
-
-```javascript
-exit
-```
-
-Restart Catalog Service if needed:
+To confirm the replica set is healthy at any time:
 
 ```powershell
-docker restart catalog-service
+docker exec -it mongo1 mongosh --quiet --eval "rs.status().members.map(m => m.name + ' ' + m.stateStr)"
 ```
+
+Expected output:
+
+```text
+[ 'mongo1:27017 PRIMARY', 'mongo2:27017 SECONDARY', 'mongo3:27017 SECONDARY' ]
+```
+
+If you reset the stack with `docker compose down -v` (which wipes the Mongo volumes), `mongo-init` will run again on the next `docker compose up` and re-bootstrap the replica set automatically.
 
 ---
 

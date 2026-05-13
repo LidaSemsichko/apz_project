@@ -589,18 +589,17 @@ Demonstrate that catalog database is replicated.
 ## Preconditions
 
 - MongoDB containers are running
-- Replica set is initialized
+- `mongo-init` has exited successfully (the replica set is initialised automatically on first start)
 
 ## Main flow
 
-1. Evaluator opens Mongo shell.
-2. Evaluator runs replica set status command.
-3. MongoDB returns one primary and two secondary nodes.
+1. Evaluator runs the replica set status command from the host.
+2. MongoDB returns one primary and two secondary nodes.
 
 Command:
 
-```javascript
-rs.status().members.map(m => ({ name: m.name, state: m.stateStr }))
+```powershell
+docker exec -it mongo1 mongosh --quiet --eval "rs.status().members.map(m => m.name + ' ' + m.stateStr)"
 ```
 
 ## Result

@@ -17,7 +17,7 @@ This document maps project requirements to implementation components and verific
 | Token/session storage | Redis | Verify token after service restart |
 | Auth failover | `auth-service-1`, `auth-service-2` | Stop service 1, verify through service 2 |
 | Separate DB per service | PostgreSQL, MongoDB, Neo4j | Docker Compose and service configs |
-| NoSQL replication | MongoDB Replica Set | `rs.status()` |
+| NoSQL replication | MongoDB Replica Set + `mongo-init` bootstrap service | `docker exec mongo1 mongosh --eval "rs.status()..."` |
 | Movie catalog | Catalog Service | Catalog UI and API |
 | Review storage | Reviews Service + PostgreSQL | Create review, get reviews |
 | Message queue | Kafka | `review.created` topic |
@@ -27,8 +27,9 @@ This document maps project requirements to implementation components and verific
 | Personalized feed | Feed Service | Feed UI |
 | UI | Streamlit frontend | Browser test |
 | Demo data | Seed Demo World | UI data seeding |
-| Docker deployment | docker-compose.yml | `docker compose up -d --build` |
+| Docker deployment | docker-compose.yml (healthchecks on all data stores) | `docker compose up -d --build` |
 | Three-layer architecture | api.py, service.py, repository.py | Repository structure |
+| Continuous Integration | `.github/workflows/ci.yml` | GitHub Actions: compose lint, Python compile, multi-service image build |
 
 ## 3. Functional Requirement Mapping
 
