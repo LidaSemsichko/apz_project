@@ -353,6 +353,12 @@ Expected response format:
 ```json
 {
   "status": "ok",
-  "service": "service-name"
+  "service": "service-name",
+  "instance": "service-instance",
+  "dependencies": {
+    "dependency-name": "ok"
+  }
 }
 ```
+
+Services may include additional informational dependency fields such as the active Redis mode or current Redis master address.

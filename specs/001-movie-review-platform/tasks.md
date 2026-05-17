@@ -156,7 +156,7 @@
 - [x] Update API Gateway `depends_on` list to reference every replica
 - [x] Update Config Server expectations (round-robin discovery already supports N>1)
 - [x] Replace single `redis` container with `redis-master` + `redis-replica-{1,2}` + `redis-sentinel-{1,2,3}` (quorum = 2)
-- [x] Switch auth-service Redis client to `redis.sentinel.Sentinel.master_for("mymaster", ...)` with fallback to legacy `REDIS_URL`
+- [x] Switch auth-service Redis access to a shared Sentinel-aware Redis client helper with fallback to legacy `REDIS_URL`
 - [x] Extend `auth/health` to report `redis_mode` and current `redis_master`
 - [x] Update `docs/architecture.md`, `docs/demo-scenarios.md`, and `README.md` to reflect new topology and ports
 - [x] Update SDD artifacts (this section, `spec.md` NFRs, `plan.md` §6, `traceability.md`, `events.md`, `sdd-spec.md`)

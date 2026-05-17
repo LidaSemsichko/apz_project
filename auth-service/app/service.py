@@ -2,12 +2,11 @@ import os
 import uuid
 from datetime import datetime, timedelta, timezone
 
-import redis
-from redis.sentinel import Sentinel
 from jose import JWTError, jwt
 from passlib.context import CryptContext
 
 from common.errors import ConflictError, NotFoundError, UnauthorizedError
+from common.redis_client import RedisClientManager
 from app.repository import (
     create_user,
     get_all_users,
@@ -28,48 +27,20 @@ REDIS_DB = int(os.getenv("REDIS_DB", "0"))
 INSTANCE_NAME = os.getenv("INSTANCE_NAME", "auth-service")
 
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
-_redis_sentinel = None
-_redis_direct_client = None
-
-
-def _parse_sentinel_hosts(raw: str):
-    pairs = []
-    for token in raw.split(","):
-        token = token.strip()
-        if not token:
-            continue
-        host, _, port = token.partition(":")
-        pairs.append((host, int(port or 26379)))
-    return pairs
+redis_client_manager = RedisClientManager(
+    redis_url=REDIS_URL,
+    sentinel_hosts_raw=REDIS_SENTINEL_HOSTS,
+    master_name=REDIS_MASTER_NAME,
+    db=REDIS_DB,
+)
 
 
 def get_redis_client():
-    """Return a Redis client. Uses a Sentinel-managed master if REDIS_SENTINEL_HOSTS
-    is set, otherwise falls back to a direct connection (legacy mode for local dev).
+    return redis_client_manager.get_client()
 
-    Sentinel mode transparently re-resolves the current master on every call,
-    so an in-flight failover only costs a couple of retries - not a restart.
-    """
-    global _redis_sentinel, _redis_direct_client
 
-    if REDIS_SENTINEL_HOSTS:
-        if _redis_sentinel is None:
-            _redis_sentinel = Sentinel(
-                _parse_sentinel_hosts(REDIS_SENTINEL_HOSTS),
-                socket_timeout=1.0,
-                socket_connect_timeout=1.0,
-            )
-        return _redis_sentinel.master_for(
-            REDIS_MASTER_NAME,
-            socket_timeout=1.0,
-            socket_connect_timeout=1.0,
-            db=REDIS_DB,
-            decode_responses=True,
-        )
-
-    if _redis_direct_client is None:
-        _redis_direct_client = redis.from_url(REDIS_URL, decode_responses=True)
-    return _redis_direct_client
+def build_auth_token_key(token_id: str) -> str:
+    return f"auth_token:{token_id}"
 
 
 def hash_password(password: str) -> str:
@@ -106,8 +77,11 @@ def create_access_token(user_id: int, email: str) -> str:
 
     token = jwt.encode(payload, JWT_SECRET, algorithm=JWT_ALGORITHM)
 
-    redis_key = f"auth_token:{token_id}"
-    get_redis_client().setex(redis_key, TOKEN_TTL_SECONDS, str(user_id))
+    get_redis_client().setex(
+        build_auth_token_key(token_id),
+        TOKEN_TTL_SECONDS,
+        str(user_id),
+    )
 
     return token
 
@@ -139,8 +113,7 @@ def verify_token(token: str):
         if not token_id:
             raise UnauthorizedError("Invalid token")
 
-        redis_key = f"auth_token:{token_id}"
-        stored_user_id = get_redis_client().get(redis_key)
+        stored_user_id = get_redis_client().get(build_auth_token_key(token_id))
 
         if stored_user_id is None:
             raise UnauthorizedError("Token is expired or logged out")
@@ -169,8 +142,7 @@ def logout_user(token: str):
         token_id = payload.get("jti")
 
         if token_id:
-            redis_key = f"auth_token:{token_id}"
-            get_redis_client().delete(redis_key)
+            get_redis_client().delete(build_auth_token_key(token_id))
 
         return {
             "message": "Logged out successfully",
@@ -220,24 +192,7 @@ def get_all_users_service():
 
 
 def get_health_dependencies():
-    dependencies = {
+    return {
         "postgres": get_database_health(),
-        "redis": "unavailable",
+        **redis_client_manager.get_health_dependencies(),
     }
-
-    try:
-        get_redis_client().ping()
-        dependencies["redis"] = "ok"
-        if REDIS_SENTINEL_HOSTS and _redis_sentinel is not None:
-            try:
-                host, port = _redis_sentinel.discover_master(REDIS_MASTER_NAME)
-                dependencies["redis_master"] = f"{host}:{port}"
-                dependencies["redis_mode"] = "sentinel"
-            except Exception:
-                dependencies["redis_mode"] = "sentinel"
-        else:
-            dependencies["redis_mode"] = "direct"
-    except Exception:
-        dependencies["redis"] = "unavailable"
-
-    return dependencies

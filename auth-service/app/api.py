@@ -28,7 +28,11 @@ router = APIRouter()
 @router.get("/health", response_model=HealthResponse)
 def health():
     dependencies = get_health_dependencies()
-    status = "ok" if all(value == "ok" for value in dependencies.values()) else "degraded"
+    dependency_statuses = [
+        dependencies.get("postgres"),
+        dependencies.get("redis"),
+    ]
+    status = "ok" if all(value == "ok" for value in dependency_statuses) else "degraded"
     return {
         "status": status,
         "service": "auth-service",

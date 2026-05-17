@@ -256,7 +256,7 @@ Implementation:
 
 - `redis-master` + `redis-replica-1` + `redis-replica-2`
 - `redis-sentinel-1/2/3` (quorum = 2, `down-after-milliseconds=5000`)
-- Auth Service uses `redis.sentinel.Sentinel.master_for("mymaster", ...)`
+- Auth Service uses a shared Sentinel-aware Redis client helper from `common.redis_client`
 
 Verification:
 

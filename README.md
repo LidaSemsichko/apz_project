@@ -111,7 +111,7 @@ apz_project/
 │   └── requirements.txt
 │
 ├── common/
-│   └── shared service discovery, auth, retry, SQLAlchemy, health helpers
+│   └── shared service discovery, auth, Redis client, retry, SQLAlchemy, health helpers
 │
 ├── auth-service/
 │   ├── app/

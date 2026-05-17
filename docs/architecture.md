@@ -434,7 +434,7 @@ redis-sentinel-2        (monitor master, quorum = 2)
 redis-sentinel-3
 ```
 
-Auth Service connects via the three sentinels rather than directly to a Redis node. The Python `redis-py` Sentinel client (`Sentinel.master_for("mymaster", ...)`) re-resolves the current master on every connection acquisition, so:
+Auth Service connects via the three sentinels rather than directly to a Redis node. It does that through a shared Redis client helper in `common`, which builds a Sentinel-backed `redis-py` client. Under the hood, Redis Sentinel support re-resolves the current master on each connection acquisition, so:
 
 ```text
 1. redis-master goes down.

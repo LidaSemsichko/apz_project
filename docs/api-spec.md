@@ -307,9 +307,20 @@ Response:
 {
   "status": "ok",
   "service": "auth-service",
-  "instance": "auth-service-1"
+  "instance": "auth-service-1",
+  "dependencies": {
+    "postgres": "ok",
+    "redis": "ok",
+    "redis_mode": "sentinel",
+    "redis_master": "172.28.0.10:6379"
+  }
 }
 ```
+
+Notes:
+
+- `status` is derived from the actual dependency statuses (`postgres` and `redis`).
+- `redis_mode` and `redis_master` are informational metadata about the active Redis connection mode and current master.
 
 ---
 

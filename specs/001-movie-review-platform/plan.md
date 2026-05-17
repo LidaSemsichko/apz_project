@@ -78,7 +78,7 @@ Deployment:
 
 - Instances: `auth-service-1` (host port 8001), `auth-service-2` (8002)
 - Shared Postgres `auth-db`
-- Redis client uses `redis.sentinel.Sentinel.master_for("mymaster", ...)` so a Redis master failover is transparent to the application after a single retry.
+- Redis access goes through a shared Sentinel-aware Redis client helper, so a Redis master failover is transparent to the application after a single retry.
 
 ## 3.3 Catalog Service
 
@@ -286,7 +286,7 @@ redis-sentinel-2    (3 sentinels, quorum = 2)
 redis-sentinel-3
 ```
 
-Sentinel parameters: `down-after-milliseconds=5000`, `failover-timeout=10000`, `parallel-syncs=1`. Total wall-clock for a master failover is approximately 5-15 seconds. Auth Service uses `redis.sentinel.Sentinel.master_for("mymaster", ...)` which re-resolves the master on each connection acquisition, so the application reconnects to the new master after the next operation without any restart.
+Sentinel parameters: `down-after-milliseconds=5000`, `failover-timeout=10000`, `parallel-syncs=1`. Total wall-clock for a master failover is approximately 5-15 seconds. Auth Service uses a shared Sentinel-aware Redis client helper, and the underlying `redis-py` Sentinel support re-resolves the master on each connection acquisition, so the application reconnects to the new master after the next operation without any restart.
 
 Trade-off: replication is asynchronous, so up to a few hundred milliseconds of writes accepted by the old master may be lost during a failover. For a token whitelist this is acceptable (worst case: a just-issued token must be re-issued by logging in again).
 
@@ -358,7 +358,7 @@ A GitHub Actions workflow (`.github/workflows/ci.yml`) runs on every push and pu
 19. Scale catalog-service to 2 instances
 20. Scale reviews-service to 2 instances (keep outbox publisher as singleton)
 21. Scale feed-api and feed-consumer to 2 instances each (same consumer group, `KAFKA_NUM_PARTITIONS=3`)
-22. Replace single Redis with master + 2 replicas + 3 sentinels; switch auth-service to `Sentinel.master_for(...)` client
+22. Replace single Redis with master + 2 replicas + 3 sentinels; switch auth-service to a shared Sentinel-aware Redis client helper
 23. Move credentials out of `docker-compose.yml` into `.env` (git-ignored), commit `.env.example`, update CI to substitute and fail on unset `${VAR}`
 24. Add `docs/testing-scenarios.md` covering failover for every tier, Kafka consumer-group rebalancing, and Redis Sentinel master promotion
 
