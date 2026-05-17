@@ -27,19 +27,20 @@ The system must:
 - Allow users to register and log in
 - Store passwords as hashes
 - Use JWT tokens for authentication
-- Store active token identifiers in Redis
+- Store active token identifiers in Redis (replicated, HA via Sentinel)
 - Support logout by removing token identifiers
-- Provide two Auth Service instances for failover
+- Run every stateless application tier (Auth, Catalog, Reviews, Feed API, Feed Consumer) as two instances behind the API Gateway so that the loss of a single instance does not interrupt service
 - Provide a movie catalog
 - Store movies in MongoDB Replica Set
 - Allow users to create and read reviews
-- Publish review creation events to Kafka
-- Consume review events in Feed Service
+- Publish review creation events to Kafka via a transactional outbox
+- Consume review events in Feed Service across two consumers sharing a single consumer group
 - Store social graph in Neo4j
 - Allow users to follow other users
 - Return personalized feed
 - Provide a browser UI
 - Run locally through Docker Compose
+- Keep credentials out of the committed repository (`.env` is git-ignored; `.env.example` is the committed template)
 
 ## 4. Non-Goals
 
@@ -249,25 +250,45 @@ The system must be split into independent services.
 
 Each microservice must own its own database or storage.
 
-### NFR-3: Fault Tolerance
+### NFR-3: Horizontal Scaling and Fault Tolerance
 
-At least one application service must be duplicated and support failover.
+Every stateless application tier must be deployed in at least two instances behind the API Gateway. The gateway must resolve instances through Config Server and retry the alternate instance on transport error or 5xx response, so that the loss of any single instance is invisible to the caller after one retry. This applies to:
+
+- Auth Service (`auth-service-1`, `auth-service-2`)
+- Catalog Service (`catalog-service-1`, `catalog-service-2`)
+- Reviews Service (`reviews-service-1`, `reviews-service-2`)
+- Feed API (`feed-api-1`, `feed-api-2`)
+- Feed Consumer (`feed-consumer-1`, `feed-consumer-2`, same Kafka consumer group)
+
+Stateful and coordinator-style components are scaled differently:
+
+- MongoDB: 3-node replica set with automatic primary election.
+- Redis: 1 master + 2 replicas + 3 sentinels (quorum = 2), failover automated by Sentinel.
+- Reviews Outbox Publisher: two workers (`reviews-outbox-publisher-1`, `reviews-outbox-publisher-2`) coordinate through `FOR UPDATE SKIP LOCKED`, so they can publish in parallel without claiming the same pending row.
 
 ### NFR-4: NoSQL Replication
 
-At least one NoSQL database must be replicated.
+At least one NoSQL database must be replicated. Implemented via MongoDB Replica Set `rs0` (3 nodes).
 
-### NFR-5: Asynchronous Processing
+### NFR-5: Cache / Session Store High Availability
 
-At least one part of the system must use a message queue.
+The distributed token/session store (Redis) must survive the loss of its primary node without operator intervention. Implemented via Redis Sentinel (3-sentinel quorum) with one master and two replicas.
 
-### NFR-6: Docker Deployment
+### NFR-6: Asynchronous Processing
+
+At least one part of the system must use a message queue. The `review.created` topic uses 3 partitions so that the two Feed Consumer instances can process events in parallel and Kafka can rebalance partitions automatically when a consumer leaves or joins the group.
+
+### NFR-7: Docker Deployment
 
 The system must run with Docker Compose.
 
-### NFR-7: Three-Layer Structure
+### NFR-8: Three-Layer Structure
 
 Each microservice must use API, Service, and Repository layers.
+
+### NFR-9: Secrets Hygiene
+
+Credentials (JWT signing secret, both Postgres user/password pairs, Neo4j password) must not be hard-coded in `docker-compose.yml` or any committed file. They are referenced as `${VAR}` and substituted at compose-up time from a `.env` file. The repository ships a `.env.example` template; the real `.env` is git-ignored.
 
 ## 8. Main Flow
 

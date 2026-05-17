@@ -12,8 +12,17 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Lint compose file
-        run: docker compose config --quiet
+      - name: Provide .env for compose interpolation
+        run: cp .env.example .env
+      - name: Lint compose file (fail on unset env vars)
+        run: |
+          output=$(docker compose config 2>&1)
+          echo "$output"
+          if echo "$output" | grep -i "is not set"; then
+            echo "::error::docker-compose.yml references a variable that is not declared in .env.example"
+            exit 1
+          fi
+          docker compose config --quiet
 
   python-syntax:
     name: Python syntax check

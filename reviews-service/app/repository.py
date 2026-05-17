@@ -1,7 +1,7 @@
 import json
 import os
 from datetime import datetime
-from typing import List
+from typing import Callable, List
 
 from sqlalchemy import Column, DateTime, Integer, String, Text
 
@@ -51,6 +51,14 @@ class OutboxEventDB(Base):
     last_error = Column(Text, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
     published_at = Column(DateTime, nullable=True)
+
+
+class OutboxPublishError(RuntimeError):
+    def __init__(self, event_id: int, topic: str, error: Exception):
+        super().__init__(str(error))
+        self.event_id = event_id
+        self.topic = topic
+        self.error = error
 
 
 def init_db():
@@ -127,34 +135,30 @@ def get_all_reviews() -> List[ReviewDB]:
         )
 
 
-def get_pending_outbox_events(limit: int = 20) -> List[OutboxEventDB]:
+def process_next_outbox_event(
+    processor: Callable[[OutboxEventDB], None],
+) -> OutboxEventDB | None:
     with session_scope(SessionLocal) as db:
-        return (
+        event = (
             db.query(OutboxEventDB)
             .filter(OutboxEventDB.status.in_(["pending", "failed"]))
-            .order_by(OutboxEventDB.created_at.asc())
-            .limit(limit)
-            .all()
+            .order_by(OutboxEventDB.created_at.asc(), OutboxEventDB.id.asc())
+            .with_for_update(skip_locked=True)
+            .first()
         )
+        if event is None:
+            return None
 
-
-def mark_outbox_published(event_id: int) -> None:
-    with session_scope(SessionLocal) as db:
-        event = db.query(OutboxEventDB).filter(OutboxEventDB.id == event_id).first()
-        if not event:
-            return
-        event.status = "published"
-        event.published_at = datetime.utcnow()
-        event.last_error = None
-        db.commit()
-
-
-def mark_outbox_failed(event_id: int, error: str) -> None:
-    with session_scope(SessionLocal) as db:
-        event = db.query(OutboxEventDB).filter(OutboxEventDB.id == event_id).first()
-        if not event:
-            return
-        event.status = "failed"
-        event.attempts += 1
-        event.last_error = error[:2000]
-        db.commit()
+        try:
+            processor(event)
+            event.status = "published"
+            event.published_at = datetime.utcnow()
+            event.last_error = None
+            db.commit()
+            return event
+        except Exception as error:
+            event.status = "failed"
+            event.attempts += 1
+            event.last_error = str(error)[:2000]
+            db.commit()
+            raise OutboxPublishError(event.id, event.topic, error) from error

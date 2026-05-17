@@ -24,18 +24,27 @@ Frontend / Streamlit UI
         v
 API Gateway
         |
-        v
-Config Server
-        |
-        +------------------------+-------------------------+----------------------+
-        |                        |                         |                      |
-        v                        v                         v                      v
-Auth Service              Catalog Service           Reviews Service        Feed API
-PostgreSQL + Redis        MongoDB Replica Set       PostgreSQL + Outbox    Neo4j
-                                                    |
-                                                    v
-                                             Outbox Publisher -> Kafka -> Feed Consumer -> Neo4j
+        +-------------------------+-------------------------+---------------------------+
+        |                         |                         |                           |
+        v                         v                         v                           v
+Auth Service x2           Catalog Service x2        Reviews Service x2          Feed API x2
+PostgreSQL                MongoDB Replica Set       PostgreSQL + Outbox         Neo4j
+       +
+Redis HA: 1 master + 2 replicas,                            |
+3 sentinels (quorum = 2)                                    v
+                                           Outbox Publishers x2
+                                                            |
+                                                            v
+                                     Kafka (review.created, 3 partitions)
+                                                            |
+                                                            v
+                                            Feed Consumer x2 (same consumer group)
+                                                            |
+                                                            v
+                                                         Neo4j
 ```
+
+Every stateless HTTP tier runs **two instances** behind the API Gateway. The gateway round-robins requests across active instances resolved from Config Server and retries the alternate instance on a 5xx or transport error. Background workers are also duplicated where parallelism is safe: the **reviews outbox publisher** now runs as two workers coordinated by Postgres row locking, and the **feed consumer** runs as two workers coordinated by the Kafka consumer group.
 
 ---
 
@@ -175,6 +184,13 @@ mongo2 -> SECONDARY
 mongo3 -> SECONDARY
 ```
 
+Deployment:
+
+- `catalog-service-1` (port 8003)
+- `catalog-service-2` (port 8013)
+
+Both instances are stateless, register with Config Server under the same `catalog-service` name, and connect to the same Mongo replica set URI. The API Gateway resolves both via Config Server and round-robins requests; if one instance dies, the gateway retries the other.
+
 ---
 
 ## 3.5 Reviews Service
@@ -196,23 +212,32 @@ Storage:
 PostgreSQL
 ```
 
-Outbox publisher:
+Deployment:
+
+- `reviews-service-1` (port 8004)
+- `reviews-service-2` (port 8014)
+
+Both instances are stateless and share the same `reviews-db`. Each instance writes the review row and the corresponding outbox event in a single transaction (transactional outbox pattern), so duplicate inserts from concurrent clients can't make the system inconsistent.
+
+Outbox publishers:
 
 ```text
-reviews-outbox-publisher publishes queued events to Kafka
+reviews-outbox-publisher-1 and reviews-outbox-publisher-2 tail outbox_events and ship to Kafka
 ```
 
+
+Both publishers issue `SELECT ... FOR UPDATE SKIP LOCKED` when they pick the next outbox row. Each worker holds the row lock until it either marks the row `published` or `failed`, so the other worker skips locked rows and keeps draining different work.
 Kafka topic:
 
 ```text
-review.created
+review.created  (3 partitions)
 ```
 
 ---
 
 ## 3.6 Feed API And Feed Consumer
 
-Feed is split into an HTTP API and a standalone Kafka consumer.
+Feed is split into an HTTP API and standalone Kafka consumers.
 
 Responsibilities:
 
@@ -227,6 +252,13 @@ Storage:
 ```text
 Neo4j
 ```
+
+Deployment:
+
+- `feed-api-1` (port 8005), `feed-api-2` (port 8015) - stateless HTTP, behind the gateway
+- `feed-consumer-1`, `feed-consumer-2` - same Kafka consumer group `feed-service-consumer-group`
+
+The two Feed Consumer instances belong to a single consumer group. Kafka assigns partitions of the `review.created` topic (3 partitions) between them, so under normal load each consumer processes ~half the events in parallel. When a consumer dies, Kafka triggers a **consumer group rebalance**: the surviving consumer is assigned all 3 partitions within a few seconds and processing continues without operator action. When the failed consumer comes back up, partitions are rebalanced again.
 
 Graph model:
 
@@ -342,7 +374,7 @@ Examples:
 Asynchronous communication is used for review event processing.
 
 ```text
-Reviews Service -> outbox_events -> Reviews Outbox Publisher -> Kafka -> Feed Consumer
+Reviews Service -> outbox_events -> Reviews Outbox Publishers -> Kafka -> Feed Consumer
 ```
 
 Flow:
@@ -351,7 +383,7 @@ Flow:
 1. User creates review.
 2. Reviews Service stores review in PostgreSQL.
 3. Reviews Service writes a review.created outbox event in the same transaction.
-4. Reviews Outbox Publisher publishes the event to Kafka.
+4. One Reviews Outbox Publisher instance locks the next pending row and publishes the event to Kafka.
 5. Feed Consumer consumes the event and updates Neo4j, then commits the Kafka offset.
 ```
 
@@ -359,32 +391,80 @@ Flow:
 
 # 6. Fault Tolerance
 
-## 6.1 Auth Service Failover
+## 6.1 Stateless Application Tiers (Auth, Catalog, Reviews, Feed API)
 
-The Auth Service is deployed in two instances:
+Every application tier runs two stateless instances and shares storage:
+
+| Service | Instances | Shared backing store |
+|---|---|---|
+| auth-service | `auth-service-1`, `auth-service-2` | Postgres `auth-db` + Redis (Sentinel-managed) |
+| catalog-service | `catalog-service-1`, `catalog-service-2` | MongoDB replica set `rs0` |
+| reviews-service | `reviews-service-1`, `reviews-service-2` | Postgres `reviews-db` (with outbox table) |
+| feed-api | `feed-api-1`, `feed-api-2` | Neo4j |
+
+All instances register with Config Server under one logical service name. The API Gateway resolves the active instance list via `GET /services/{name}`, then in `call_service` iterates over instances and retries the next one on any transport error or 5xx response. So a `docker stop <instance>` is invisible to the caller after one retry - the user-facing API never returns an error for an instance loss, as long as at least one peer is still alive.
+
+Failover scenario (works the same for every tier above):
 
 ```text
-auth-service-1
-auth-service-2
+1. Client makes a request to the API Gateway.
+2. Gateway calls Config Server: GET /services/<service>.
+3. Gateway tries instance #1.
+4. If instance #1 is down (connection refused or 5xx),
+   gateway retries on instance #2.
+5. Client sees a successful response.
 ```
 
-JWT token identifiers are stored in Redis. Because token state is stored in Redis and not in local service memory, another Auth Service instance can continue validating tokens if one instance fails.
-
-Failover scenario:
-
-```text
-1. User logs in through the API Gateway.
-2. Token id is stored in Redis.
-3. auth-service-1 is stopped.
-4. User verifies the same token through the API Gateway.
-5. The gateway resolves auth-service-2 through Config Server, and auth-service-2 validates token state using Redis.
-```
+For Auth specifically: because the active-token-id whitelist lives in Sentinel-managed Redis (not in service memory), a token issued by `auth-service-1` can be verified by `auth-service-2`.
 
 ---
 
-## 6.2 MongoDB Replica Set
+## 6.2 Redis HA via Sentinel
 
-The Catalog Service uses a three-node MongoDB Replica Set (`mongo1`, `mongo2`, `mongo3`, all running with `--replSet rs0`). The replica set is bootstrapped automatically on first start by a one-shot `mongo-init` service defined in `docker-compose.yml`, which is idempotent — on subsequent starts it detects that `rs0` is already initialised and exits without changes. `catalog-service` declares `depends_on: mongo-init: service_completed_successfully`, so it never starts until the replica set has a PRIMARY elected.
+Redis stores the active JWT token whitelist for the Auth Service. It is a critical dependency: if Redis is unreachable, `verify_token` fails and every protected endpoint returns 401, regardless of how many Auth Service instances are running. A single Redis container is therefore a single point of failure for the entire auth flow.
+
+The deployed topology is:
+
+```text
+redis-master            (writable)
+redis-replica-1         (read-only async replica)
+redis-replica-2         (read-only async replica)
+redis-sentinel-1
+redis-sentinel-2        (monitor master, quorum = 2)
+redis-sentinel-3
+```
+
+Auth Service connects via the three sentinels rather than directly to a Redis node. The Python `redis-py` Sentinel client (`Sentinel.master_for("mymaster", ...)`) re-resolves the current master on every connection acquisition, so:
+
+```text
+1. redis-master goes down.
+2. Within `down-after-milliseconds` (5s), sentinels mark it +sdown.
+3. Sentinels reach quorum (2 of 3) and declare +odown.
+4. A leader sentinel is elected.
+5. The leader promotes one replica to master (~5-10s).
+6. Auth Service's next request fails once, retries, gets the new
+   master from a sentinel, succeeds.
+```
+
+The previous master, when it comes back up, is automatically reconfigured as a replica of the new master.
+
+Trade-off: this is asynchronous replication, so up to a few hundred ms of writes accepted by the old master could be lost in a fail-over. For a token whitelist that's acceptable - the worst case is a freshly issued token that needs to be re-issued by re-logging in.
+
+---
+
+## 6.3 Reviews Outbox Publisher (Two Instances, Row-Locked)
+
+The two reviews-service HTTP instances both insert into `outbox_events` in their request transaction, and now **two** outbox publishers read from that table and forward rows to Kafka.
+
+Safety comes from the publisher-side query: each worker processes one row inside a database transaction and selects it with `FOR UPDATE SKIP LOCKED`. While publisher A is sending row N to Kafka, publisher B skips row N and claims a different pending row. Only after the publish succeeds does the transaction mark the row as `published` and commit. On publish failure the same transaction marks the row `failed`, increments `attempts`, and releases it for retry.
+
+This keeps the behavior at-least-once, which matches the rest of the pipeline: if a publisher crashes after Kafka acknowledges the send but before the Postgres transaction commits, the row is retried and Kafka may see the event again. That is acceptable here because the Feed Consumer writes through idempotent Neo4j `MERGE` operations.
+
+---
+
+## 6.4 MongoDB Replica Set
+
+The Catalog Service uses a three-node MongoDB Replica Set (`mongo1`, `mongo2`, `mongo3`, all running with `--replSet rs0`). The replica set is bootstrapped automatically on first start by a one-shot `mongo-init` service defined in `docker-compose.yml`, which is idempotent - on subsequent starts it detects that `rs0` is already initialised and exits without changes. `catalog-service` declares `depends_on: mongo-init: service_completed_successfully`, so it never starts until the replica set has a PRIMARY elected.
 
 Benefits:
 
@@ -421,19 +501,31 @@ Main services:
 ```text
 frontend
 api-gateway
+config-server
 auth-service-1
 auth-service-2
-catalog-service
-reviews-service
-feed-api
-feed-consumer
-reviews-outbox-publisher
+catalog-service-1
+catalog-service-2
+reviews-service-1
+reviews-service-2
+reviews-outbox-publisher-1
+reviews-outbox-publisher-2
+feed-api-1
+feed-api-2
+feed-consumer-1
+feed-consumer-2
 auth-db
 reviews-db
-redis
+redis-master
+redis-replica-1
+redis-replica-2
+redis-sentinel-1
+redis-sentinel-2
+redis-sentinel-3
 mongo1
 mongo2
 mongo3
+mongo-init     (one-shot, exits 0 after rs.initiate)
 zookeeper
 kafka
 neo4j
@@ -449,19 +541,23 @@ docker compose up -d --build
 
 # 8. Ports
 
-| Component | Port |
+| Component | Host port |
 |---|---|
 | Frontend | 8501 |
 | API Gateway | 8000 |
 | Auth Service 1 | 8001 |
 | Auth Service 2 | 8002 |
-| Catalog Service | 8003 |
-| Reviews Service | 8004 |
-| Feed API | 8005 |
+| Catalog Service 1 | 8003 |
+| Catalog Service 2 | 8013 |
+| Reviews Service 1 | 8004 |
+| Reviews Service 2 | 8014 |
+| Feed API 1 | 8005 |
+| Feed API 2 | 8015 |
 | Config Server | 8010 |
 | Neo4j Browser | 7474 |
 | Neo4j Bolt | 7687 |
-| Redis | 6379 |
+| Redis Master | 6379 |
+| Redis Sentinel 1/2/3 | 26379 (in-cluster only) |
 | Kafka | 9092 |
 | PostgreSQL Auth DB | 5433 |
 | PostgreSQL Reviews DB | 5434 |

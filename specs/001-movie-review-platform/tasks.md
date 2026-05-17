@@ -143,9 +143,37 @@
 - [x] CI job: validate `docker-compose.yml` syntax (`docker compose config`)
 - [x] CI job: Python `compileall` across all services
 - [x] CI job: matrix build of every service's Docker image
+- [x] CI job: provision `.env` from `.env.example` before `docker compose config`, fail on any unset `${VAR}`
+
+## Phase 12: Horizontal Scaling and HA
+
+- [x] Split `catalog-service` into `catalog-service-1` (8003) and `catalog-service-2` (8013)
+- [x] Split `reviews-service` into `reviews-service-1` (8004) and `reviews-service-2` (8014)
+- [x] Scale `reviews-outbox-publisher` to `reviews-outbox-publisher-{1,2}` using `FOR UPDATE SKIP LOCKED`
+- [x] Split `feed-api` into `feed-api-1` (8005) and `feed-api-2` (8015)
+- [x] Split `feed-consumer` into `feed-consumer-1` and `feed-consumer-2` in the same Kafka consumer group
+- [x] Bump Kafka `KAFKA_NUM_PARTITIONS` to 3 so consumers can split partitions and rebalance
+- [x] Update API Gateway `depends_on` list to reference every replica
+- [x] Update Config Server expectations (round-robin discovery already supports N>1)
+- [x] Replace single `redis` container with `redis-master` + `redis-replica-{1,2}` + `redis-sentinel-{1,2,3}` (quorum = 2)
+- [x] Switch auth-service Redis client to `redis.sentinel.Sentinel.master_for("mymaster", ...)` with fallback to legacy `REDIS_URL`
+- [x] Extend `auth/health` to report `redis_mode` and current `redis_master`
+- [x] Update `docs/architecture.md`, `docs/demo-scenarios.md`, and `README.md` to reflect new topology and ports
+- [x] Update SDD artifacts (this section, `spec.md` NFRs, `plan.md` §6, `traceability.md`, `events.md`, `sdd-spec.md`)
+
+## Phase 13: Secrets Hygiene
+
+- [x] Create `.env.example` with placeholder values for every credential
+- [x] Create `.env` for local dev (git-ignored)
+- [x] Replace every literal credential and connection string in `docker-compose.yml` with `${VAR}` references
+- [x] Confirm `.env` is in `.gitignore`
+- [x] Document the `Copy-Item .env.example .env` step in README
+- [x] Update CI compose-config job to copy `.env.example` to `.env` and fail on unset `${VAR}`
 
 ## Optional Future Tasks
 
+- [ ] Postgres HA for `auth-db` and `reviews-db` (e.g., via `bitnami/postgresql-repmgr` + `pgpool-II`)
+- [ ] Move secrets from `.env` to Docker secrets (`/run/secrets/...`) and adapt services to read `*_FILE` env vars
 - [ ] Add screenshots to README
 - [ ] Add review editing
 - [ ] Add review deletion
@@ -153,4 +181,3 @@
 - [ ] Add better recommendation algorithm
 - [ ] Add API authentication checks inside Reviews and Feed
 - [ ] Add Kubernetes manifests
-- [ ] Add load balancing fallback in API Gateway for Auth Service

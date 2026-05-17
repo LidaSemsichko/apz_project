@@ -14,10 +14,14 @@ This document maps project requirements to implementation components and verific
 | Login/logout | Auth endpoints | UI Auth page, API tests |
 | Password hashing | bcrypt in Auth Service | User stored with password hash |
 | JWT token | Auth Service | Login returns access token |
-| Token/session storage | Redis | Verify token after service restart |
-| Auth failover | `auth-service-1`, `auth-service-2` | Stop service 1, verify through service 2 |
-| Separate DB per service | PostgreSQL, MongoDB, Neo4j | Docker Compose and service configs |
+| Token/session storage | Redis (Sentinel-managed: master + 2 replicas + 3 sentinels) | Verify token after Redis master failover (`docker stop redis-master`); `/auth/health` reports new `redis_master` within ~15s |
+| Horizontal scaling | Two instances of every stateless tier (auth, catalog, reviews, feed-api, feed-consumer) behind gateway-side discovery + retry | `docker stop <any single instance>`, repeat request through gateway, observe no error |
+| Cache HA via Sentinel | `redis-master`, `redis-replica-1/2`, `redis-sentinel-1/2/3` (quorum = 2) | `docker stop redis-master`, then `sentinel get-master-addr-by-name mymaster` reports a replica |
+| Separate DB per service | PostgreSQL (auth-db, reviews-db), MongoDB, Neo4j | Docker Compose and service configs |
 | NoSQL replication | MongoDB Replica Set + `mongo-init` bootstrap service | `docker exec mongo1 mongosh --eval "rs.status()..."` |
+| Kafka consumer group | `feed-consumer-1` and `feed-consumer-2` in `feed-service-consumer-group`, 3 partitions | `kafka-consumer-groups --describe`, then `docker stop feed-consumer-1`, observe rebalance |
+| Transactional outbox | Reviews-service writes review + outbox event in one Postgres TX; two publishers drain it with `FOR UPDATE SKIP LOCKED` | Inspect `outbox_events` rows + `reviews-outbox-publisher-{1,2}` logs |
+| Secrets hygiene | `${VAR}` substitutions in `docker-compose.yml`; `.env.example` template committed; `.env` git-ignored | `grep` the compose file for literal credentials returns nothing; CI fails on unset `${VAR}` |
 | Movie catalog | Catalog Service | Catalog UI and API |
 | Review storage | Reviews Service + PostgreSQL | Create review, get reviews |
 | Message queue | Kafka | `review.created` topic |
@@ -221,23 +225,49 @@ Verification:
 - docker-compose.yml
 - Service environment variables
 
-### NFR-3: Auth Failover
+### NFR-3: Horizontal Scaling and Fault Tolerance
 
 Implementation:
 
-- Two Auth instances
-- Shared Redis token storage
+- Two instances per stateless tier: `auth-service-{1,2}`, `catalog-service-{1,2}`, `reviews-service-{1,2}`, `feed-api-{1,2}`, `feed-consumer-{1,2}`
+- Gateway resolves instances via Config Server and retries the alternate instance on transport error or 5xx
+- Reviews Outbox Publisher runs as `reviews-outbox-publisher-{1,2}` and coordinates through `FOR UPDATE SKIP LOCKED` (documented in `plan.md` Section 6.3)
 
 Verification:
 
 ```powershell
 docker stop auth-service-1
+docker stop catalog-service-1
+docker stop reviews-service-1
+docker stop feed-api-1
+docker stop feed-consumer-1
 ```
 
-Then verify token through:
+Then, through the gateway:
 
 ```text
-http://localhost:8002/verify
+http://localhost:8000/health
+http://localhost:8000/<tier>/...
+```
+
+### NFR-3a: Cache HA via Sentinel
+
+Implementation:
+
+- `redis-master` + `redis-replica-1` + `redis-replica-2`
+- `redis-sentinel-1/2/3` (quorum = 2, `down-after-milliseconds=5000`)
+- Auth Service uses `redis.sentinel.Sentinel.master_for("mymaster", ...)`
+
+Verification:
+
+```powershell
+docker stop redis-master
+Start-Sleep -Seconds 15
+docker exec redis-sentinel-1 redis-cli -p 26379 sentinel get-master-addr-by-name mymaster
+# expect: redis-replica-1 or redis-replica-2
+
+(Invoke-RestMethod http://localhost:8000/auth/health).dependencies.redis_master
+# expect: the new master
 ```
 
 ### NFR-4: NoSQL Replication
@@ -252,17 +282,27 @@ Verification:
 rs.status().members.map(m => ({ name: m.name, state: m.stateStr }))
 ```
 
-### NFR-5: Message Queue
+### NFR-5: Message Queue and Consumer Group Rebalancing
 
 Implementation:
 
 - Kafka
-- Topic `review.created`
+- Topic `review.created` with 3 partitions (`KAFKA_NUM_PARTITIONS=3`)
+- Two consumers in `feed-service-consumer-group`
 
 Verification:
 
 ```powershell
 docker exec -it kafka kafka-topics --bootstrap-server kafka:9092 --list
+docker exec -it kafka kafka-consumer-groups --bootstrap-server kafka:9092 `
+  --group feed-service-consumer-group --describe
+# expect: 3 partitions split across feed-consumer-1 and feed-consumer-2
+
+docker stop feed-consumer-1
+Start-Sleep -Seconds 10
+docker exec -it kafka kafka-consumer-groups --bootstrap-server kafka:9092 `
+  --group feed-service-consumer-group --describe
+# expect: all 3 partitions on feed-consumer-2
 ```
 
 ### NFR-6: Docker Deployment
@@ -277,7 +317,25 @@ Verification:
 docker compose up -d --build
 ```
 
-### NFR-7: Three-Layer Architecture
+### NFR-7: Secrets Hygiene
+
+Implementation:
+
+- `docker-compose.yml` references credentials as `${VAR}`
+- `.env.example` committed; `.env` git-ignored
+- CI provisions `.env` from `.env.example` and fails on any unset `${VAR}`
+
+Verification:
+
+```powershell
+Select-String -Path docker-compose.yml -Pattern "supersecret|password123|auth_pass|reviews_pass"
+# expect: no matches
+
+Get-Content .gitignore | Select-String "^.env$"
+# expect: .env is listed
+```
+
+### NFR-8: Three-Layer Architecture
 
 Implementation:
 
@@ -326,18 +384,25 @@ UI displays review with username and movie title
 
 | Check | Status |
 |---|---|
-| Docker Compose starts all services | Passed |
+| Docker Compose starts all 28 long-running services + `mongo-init` exits 0 | Passed |
 | API Gateway works | Passed |
 | Auth works | Passed |
 | Logout works | Passed |
 | Redis token storage works | Passed |
-| Auth failover works | Passed |
-| Catalog works | Passed |
+| Auth failover works (stop `auth-service-1`, traffic continues) | Passed |
+| Catalog failover works (stop `catalog-service-1`, traffic continues) | Passed |
+| Reviews failover works (stop `reviews-service-1`, traffic continues) | Passed |
+| Feed API failover works (stop `feed-api-1`, traffic continues) | Passed |
+| Feed Consumer rebalances on failure (stop `feed-consumer-1`, partitions reassigned) | Passed |
+| Redis Sentinel failover works (stop `redis-master`, replica promoted) | Passed |
 | MongoDB Replica Set works | Passed |
 | Reviews work | Passed |
+| Outbox publisher delivers to Kafka | Passed |
 | Kafka producer works | Passed |
 | Kafka consumer works | Passed |
 | Feed works | Passed |
 | Neo4j graph works | Passed |
 | UI works | Passed |
 | Demo data seeding works | Passed |
+| No literal credentials in `docker-compose.yml` (all `${VAR}`) | Passed |
+| CI provisions `.env` from `.env.example` and fails on unset `${VAR}` | Passed |

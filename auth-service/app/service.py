@@ -3,6 +3,7 @@ import uuid
 from datetime import datetime, timedelta, timezone
 
 import redis
+from redis.sentinel import Sentinel
 from jose import JWTError, jwt
 from passlib.context import CryptContext
 
@@ -20,18 +21,55 @@ from app.repository import (
 JWT_SECRET = os.getenv("JWT_SECRET", "supersecret")
 JWT_ALGORITHM = "HS256"
 TOKEN_TTL_SECONDS = int(os.getenv("TOKEN_TTL_SECONDS", "3600"))
-REDIS_URL = os.getenv("REDIS_URL", "redis://redis:6379/0")
+REDIS_URL = os.getenv("REDIS_URL", "redis://redis-master:6379/0")
+REDIS_SENTINEL_HOSTS = os.getenv("REDIS_SENTINEL_HOSTS", "")
+REDIS_MASTER_NAME = os.getenv("REDIS_MASTER_NAME", "mymaster")
+REDIS_DB = int(os.getenv("REDIS_DB", "0"))
 INSTANCE_NAME = os.getenv("INSTANCE_NAME", "auth-service")
 
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
-_redis_client = None
+_redis_sentinel = None
+_redis_direct_client = None
+
+
+def _parse_sentinel_hosts(raw: str):
+    pairs = []
+    for token in raw.split(","):
+        token = token.strip()
+        if not token:
+            continue
+        host, _, port = token.partition(":")
+        pairs.append((host, int(port or 26379)))
+    return pairs
 
 
 def get_redis_client():
-    global _redis_client
-    if _redis_client is None:
-        _redis_client = redis.from_url(REDIS_URL, decode_responses=True)
-    return _redis_client
+    """Return a Redis client. Uses a Sentinel-managed master if REDIS_SENTINEL_HOSTS
+    is set, otherwise falls back to a direct connection (legacy mode for local dev).
+
+    Sentinel mode transparently re-resolves the current master on every call,
+    so an in-flight failover only costs a couple of retries - not a restart.
+    """
+    global _redis_sentinel, _redis_direct_client
+
+    if REDIS_SENTINEL_HOSTS:
+        if _redis_sentinel is None:
+            _redis_sentinel = Sentinel(
+                _parse_sentinel_hosts(REDIS_SENTINEL_HOSTS),
+                socket_timeout=1.0,
+                socket_connect_timeout=1.0,
+            )
+        return _redis_sentinel.master_for(
+            REDIS_MASTER_NAME,
+            socket_timeout=1.0,
+            socket_connect_timeout=1.0,
+            db=REDIS_DB,
+            decode_responses=True,
+        )
+
+    if _redis_direct_client is None:
+        _redis_direct_client = redis.from_url(REDIS_URL, decode_responses=True)
+    return _redis_direct_client
 
 
 def hash_password(password: str) -> str:
@@ -190,6 +228,15 @@ def get_health_dependencies():
     try:
         get_redis_client().ping()
         dependencies["redis"] = "ok"
+        if REDIS_SENTINEL_HOSTS and _redis_sentinel is not None:
+            try:
+                host, port = _redis_sentinel.discover_master(REDIS_MASTER_NAME)
+                dependencies["redis_master"] = f"{host}:{port}"
+                dependencies["redis_mode"] = "sentinel"
+            except Exception:
+                dependencies["redis_mode"] = "sentinel"
+        else:
+            dependencies["redis_mode"] = "direct"
     except Exception:
         dependencies["redis"] = "unavailable"
 

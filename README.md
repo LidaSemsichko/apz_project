@@ -41,32 +41,39 @@ Config Server (service discovery)
         +------------------------+-------------------------+----------------------+
         |                        |                         |                      |
         v                        v                         v                      v
-Auth Service              Catalog Service           Reviews Service        Feed API
-PostgreSQL + Redis        MongoDB Replica Set       PostgreSQL + Outbox    Neo4j
+Auth Service x2           Catalog Service x2        Reviews Service x2     Feed API x2
+PostgreSQL + Redis HA     MongoDB Replica Set       PostgreSQL + Outbox    Neo4j
                                                     |
                                                     v
-                                             Outbox Publisher -> Kafka -> Feed Consumer -> Neo4j
+                                          Outbox Publishers x2 -> Kafka -> Feed Consumers x2 -> Neo4j
 ```
 
 ---
 
 ## Services
 
-| Service | Description | Port |
+| Service | Description | Host port |
 |---|---|---|
 | Frontend | Streamlit UI | 8501 |
 | API Gateway | Single entry point for the frontend | 8000 |
 | Config Server | Service registry and discovery | 8010 |
 | Auth Service 1 | Authentication service instance 1 | 8001 |
 | Auth Service 2 | Authentication service instance 2 | 8002 |
-| Catalog Service | Movie catalog service | 8003 |
-| Reviews Service | Movie reviews service | 8004 |
-| Reviews Outbox Publisher | Publishes queued review events to Kafka | internal |
-| Feed API | Social feed HTTP API | 8005 |
-| Feed Consumer | Consumes review events into Neo4j | internal |
+| Catalog Service 1 | Movie catalog instance 1 | 8003 |
+| Catalog Service 2 | Movie catalog instance 2 | 8013 |
+| Reviews Service 1 | Movie reviews instance 1 | 8004 |
+| Reviews Service 2 | Movie reviews instance 2 | 8014 |
+| Reviews Outbox Publisher 1 | Publishes locked outbox rows to Kafka | internal |
+| Reviews Outbox Publisher 2 | Publishes locked outbox rows to Kafka | internal |
+| Feed API 1 | Social feed HTTP API instance 1 | 8005 |
+| Feed API 2 | Social feed HTTP API instance 2 | 8015 |
+| Feed Consumer 1 | Consumes `review.created` into Neo4j | internal |
+| Feed Consumer 2 | Same consumer group as Feed Consumer 1 | internal |
 | Neo4j Browser | Graph database UI | 7474 |
-| Kafka | Message broker | 9092 |
-| Redis | Token storage | 6379 |
+| Kafka | Message broker (3 default partitions) | 9092 |
+| Redis Master | JWT whitelist primary | 6379 |
+| Redis Replica 1/2 | JWT whitelist replicas | internal |
+| Redis Sentinel 1/2/3 | Redis failover quorum | internal (26379) |
 | MongoDB node 1 | MongoDB replica set node | 27017 |
 | MongoDB node 2 | MongoDB replica set node | 27018 |
 | MongoDB node 3 | MongoDB replica set node | 27019 |
@@ -82,7 +89,7 @@ PostgreSQL + Redis        MongoDB Replica Set       PostgreSQL + Outbox    Neo4j
 | PostgreSQL | Auth users and reviews |
 | Redis | Active JWT token identifiers |
 | MongoDB Replica Set | Movie catalog |
-| Kafka | Asynchronous `review.created` events from the outbox publisher |
+| Kafka | Asynchronous `review.created` events from the outbox publishers |
 | Neo4j | Social graph, follows, reviewed movies |
 | Docker Compose | Local deployment |
 
@@ -171,6 +178,14 @@ From the project root (substitute your own checkout path):
 cd <path to apz_project>
 ```
 
+Before the first run, copy the environment template to a real `.env`:
+
+```powershell
+Copy-Item .env.example .env
+```
+
+The `.env` file is git-ignored and holds the local-development credentials that `docker-compose.yml` substitutes into the containers (Postgres usernames/passwords for both DBs, the JWT signing secret, Neo4j credentials).
+
 Build and start all containers:
 
 ```powershell
@@ -185,7 +200,7 @@ Check running containers:
 docker ps
 ```
 
-Expected main containers (19 long-running + 1 short-lived `mongo-init` that you may see as `Exited (0)`):
+Expected main containers (29 long-running + 1 short-lived `mongo-init` that you may see as `Exited (0)`):
 
 ```text
 config-server
@@ -193,14 +208,24 @@ frontend
 api-gateway
 auth-service-1
 auth-service-2
-catalog-service
-reviews-service
-reviews-outbox-publisher
-feed-api
-feed-consumer
+catalog-service-1
+catalog-service-2
+reviews-service-1
+reviews-service-2
+reviews-outbox-publisher-1
+reviews-outbox-publisher-2
+feed-api-1
+feed-api-2
+feed-consumer-1
+feed-consumer-2
 auth-db
 reviews-db
-redis
+redis-master
+redis-replica-1
+redis-replica-2
+redis-sentinel-1
+redis-sentinel-2
+redis-sentinel-3
 mongo1
 mongo2
 mongo3
@@ -439,7 +464,7 @@ Reviews Service
 PostgreSQL reviews + outbox_events
         |
         v
-Reviews Outbox Publisher
+Reviews Outbox Publishers x2
         |
         v
 Kafka topic: review.created
@@ -451,22 +476,22 @@ Feed Consumer
 Neo4j graph update
 ```
 
-Check Reviews Service logs:
+Check Reviews Outbox Publisher logs:
 
 ```powershell
-docker logs reviews-outbox-publisher --tail 100
+docker compose logs --tail 100 reviews-outbox-publisher-1 reviews-outbox-publisher-2
 ```
 
 Expected log:
 
 ```text
-[REVIEWS-OUTBOX] Published event
+event=outbox_published
 ```
 
 Check Feed Consumer logs:
 
 ```powershell
-docker logs feed-consumer --tail 100
+docker compose logs --tail 100 feed-consumer-1 feed-consumer-2
 ```
 
 Expected log:
@@ -637,11 +662,11 @@ docker compose build --no-cache api-gateway
 docker compose up -d api-gateway
 ```
 
-Rebuild only one backend service:
+Rebuild the Reviews service image and both outbox publishers:
 
 ```powershell
-docker compose build --no-cache reviews-service
-docker compose up -d reviews-service
+docker compose build --no-cache reviews-service-1 reviews-service-2 reviews-outbox-publisher-1 reviews-outbox-publisher-2
+docker compose up -d reviews-service-1 reviews-service-2 reviews-outbox-publisher-1 reviews-outbox-publisher-2
 ```
 
 ---
@@ -654,6 +679,7 @@ Additional documentation is located in the `docs/` folder:
 docs/api-spec.md
 docs/architecture.md
 docs/backlog.md
+docs/demo-scenarios.md
 docs/use-cases.md
 ```
 
@@ -668,12 +694,12 @@ docs/use-cases.md
 | Login/logout | Implemented |
 | Password hash | bcrypt hash in PostgreSQL |
 | JWT/session | JWT |
-| Distributed session/token storage | Redis |
-| Duplicated application server | Two Auth Service instances |
+| Distributed session/token storage | Redis (HA: 1 master + 2 replicas + 3 sentinels, quorum 2) |
+| Duplicated application server | Two instances of every HTTP tier (auth, catalog, reviews, feed-api) behind gateway-side discovery + retry, plus two outbox publishers and two feed consumers |
 | Separate database per service | PostgreSQL, MongoDB, Neo4j |
 | NoSQL replication | MongoDB Replica Set |
 | Message queue | Kafka |
-| Async processing | Reviews outbox publisher to Kafka to Feed Consumer |
+| Async processing | Reviews outbox publishers to Kafka to Feed Consumers |
 | API Gateway | Implemented |
 | Docker Compose | Implemented |
 | Working UI | Streamlit frontend |

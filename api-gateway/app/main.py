@@ -1,4 +1,5 @@
 import os
+import random
 
 import httpx
 from fastapi import FastAPI, HTTPException, Query, Request, Response
@@ -71,6 +72,7 @@ async def call_service(
     query_string: str = "",
 ) -> httpx.Response:
     instances = await resolve_instances(client, service_name)
+    random.shuffle(instances)
     last_error: Exception | None = None
     last_response: httpx.Response | None = None
 

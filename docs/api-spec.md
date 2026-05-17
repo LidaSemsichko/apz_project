@@ -18,7 +18,7 @@ Main services:
 | Auth Service | Registration, login, logout, JWT verification, user lookup |
 | Catalog Service | Movie catalog and search |
 | Reviews Service | Review creation and retrieval, PostgreSQL outbox |
-| Reviews Outbox Publisher | Publishes queued review events to Kafka |
+| Reviews Outbox Publisher x2 | Two worker instances publish locked review events to Kafka |
 | Feed API | Follow relationships, personal feed, Neo4j graph |
 | Feed Consumer | Consumes Kafka review events into Neo4j |
 
@@ -481,7 +481,7 @@ Base path:
 /reviews
 ```
 
-The Reviews Service stores reviews in PostgreSQL and writes `review.created` events to an outbox table in the same transaction. A separate outbox publisher sends queued events to Kafka.
+The Reviews Service stores reviews in PostgreSQL and writes `review.created` events to an outbox table in the same transaction. A pair of outbox publishers sends queued events to Kafka using Postgres row locking.
 
 ---
 
@@ -520,7 +520,7 @@ Notes:
 - `rating` must be between 1 and 10.
 - The service uses the JWT user id.
 - Review storage and outbox event creation are atomic.
-- The outbox publisher later publishes the queued Kafka event to topic `review.created`.
+- One of the outbox publishers later locks and publishes the queued Kafka event to topic `review.created`.
 
 ---
 
@@ -722,8 +722,10 @@ review.created
 ## Producer
 
 ```text
-Reviews Outbox Publisher
+Reviews Outbox Publisher x2
 ```
+
+The publishers coordinate through `SELECT ... FOR UPDATE SKIP LOCKED`, so each worker locks a different pending row while it publishes to Kafka.
 
 ## Consumer
 
@@ -754,7 +756,7 @@ User creates review
 Reviews Service stores review and outbox event in PostgreSQL
         |
         v
-Reviews Outbox Publisher publishes review.created event to Kafka
+One Reviews Outbox Publisher instance locks and publishes the review.created event to Kafka
         |
         v
 Feed Consumer consumes event

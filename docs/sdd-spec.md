@@ -92,16 +92,19 @@ The project demonstrates:
 
 ## 6. Implementation Summary
 
-The system consists of the following services:
+The system consists of the following services. Stateless application tiers run as two instances behind the API Gateway:
 
-| Service | Responsibility |
-|---|---|
-| Frontend | Streamlit UI |
-| API Gateway | Single entry point and request routing |
-| Auth Service | Registration, login, logout, JWT verification, user lookup |
-| Catalog Service | Movie catalog stored in MongoDB Replica Set |
-| Reviews Service | Review storage and Kafka event publishing |
-| Feed Service | Kafka event consumption, Neo4j graph, personalized feed |
+| Service | Instances | Responsibility |
+|---|---|---|
+| Frontend | 1 | Streamlit UI |
+| API Gateway | 1 | Single entry point and request routing; resolves instances via Config Server and retries on failure |
+| Config Server | 1 | Service registry (register / heartbeat / discover) |
+| Auth Service | 2 | Registration, login, logout, JWT verification, user lookup |
+| Catalog Service | 2 | Movie catalog stored in MongoDB Replica Set |
+| Reviews Service | 2 | Review storage + transactional outbox |
+| Reviews Outbox Publisher | 2 | Two workers tail the outbox table and publish to Kafka via row-level locking |
+| Feed API | 2 | Feed / follow / recommendations over Neo4j |
+| Feed Consumer | 2 | Same Kafka consumer group; processes `review.created` and writes Neo4j |
 
 ## 7. Data Ownership
 
@@ -109,10 +112,14 @@ Each service owns its own data storage:
 
 | Service | Storage |
 |---|---|
-| Auth Service | PostgreSQL + Redis |
-| Catalog Service | MongoDB Replica Set |
-| Reviews Service | PostgreSQL |
+| Auth Service | PostgreSQL (`auth-db`) + Redis HA (1 master + 2 replicas + 3 sentinels) |
+| Catalog Service | MongoDB Replica Set (3 nodes, `rs0`) |
+| Reviews Service | PostgreSQL (`reviews-db`) with `outbox_events` table |
 | Feed Service | Neo4j |
+
+## 7.1 Secrets Management
+
+Credentials (`JWT_SECRET`, the two Postgres user/password/db triples, Neo4j credentials) are kept out of the committed repository. `docker-compose.yml` references them as `${VAR}`; the values come from a `.env` file in the project root, which is git-ignored. A committed `.env.example` documents the variable set and provides local-dev defaults. CI provisions `.env` from `.env.example` before running `docker compose config` and fails the build on any unset variable.
 
 ## 8. Event-Driven Flow
 
@@ -137,9 +144,12 @@ Feed endpoint returns reviews from followed users
 The implementation is validated through:
 
 - UI testing
-- API Gateway health checks
-- MongoDB Replica Set status
-- Auth failover test
+- API Gateway health checks (`/health`, `/auth/health`, `/catalog/health`, `/reviews/health`, `/feed/health`)
+- Config Server discovery check (every service should list 2 instances)
+- MongoDB Replica Set status (`rs.status()`)
+- Per-tier failover tests (stop one instance, verify gateway-routed traffic still works)
+- Redis Sentinel failover test (stop `redis-master`, verify a replica is promoted within ~15s)
+- Kafka consumer-group rebalance test (`kafka-consumer-groups --describe` before/after stopping a consumer)
 - Kafka publish/consume logs
 - Neo4j graph visualization
 - End-to-end review-to-feed flow

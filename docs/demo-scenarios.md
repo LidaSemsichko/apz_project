@@ -14,19 +14,32 @@ Check running containers:
 docker ps
 ```
 
-Expected main containers (16 long-running plus the one-shot `mongo-init` which exits with code 0 after bootstrapping the replica set):
+Expected main containers (29 long-running plus the one-shot `mongo-init` which exits with code 0 after bootstrapping the replica set):
 
 ```text
+config-server
 frontend
 api-gateway
 auth-service-1
 auth-service-2
-catalog-service
-reviews-service
-feed-service
+catalog-service-1
+catalog-service-2
+reviews-service-1
+reviews-service-2
+reviews-outbox-publisher-1
+reviews-outbox-publisher-2
+feed-api-1
+feed-api-2
+feed-consumer-1
+feed-consumer-2
 auth-db
 reviews-db
-redis
+redis-master
+redis-replica-1
+redis-replica-2
+redis-sentinel-1
+redis-sentinel-2
+redis-sentinel-3
 mongo1
 mongo2
 mongo3
@@ -217,7 +230,6 @@ Create review:
 
 ```powershell
 $reviewBody = @{
-  user_id = 1
   item_id = $movieId
   text = "Amazing movie with strong atmosphere."
   rating = 10
@@ -230,16 +242,16 @@ Invoke-RestMethod `
   -Body $reviewBody
 ```
 
-Check Reviews Service logs:
+Check Reviews Outbox Publisher logs:
 
 ```powershell
-docker logs reviews-service --tail 100
+docker compose logs --tail 100 reviews-outbox-publisher-1 reviews-outbox-publisher-2 | Select-String "event=outbox_published"
 ```
 
 Expected log:
 
 ```text
-[REVIEWS] Published event to Kafka
+event=outbox_published
 ```
 
 Check Kafka topics:
@@ -256,10 +268,10 @@ review.created
 
 ## 9. Feed and Neo4j Demo
 
-Check Feed Service logs:
+Check Feed Consumer logs:
 
 ```powershell
-docker logs feed-consumer --tail 100
+docker compose logs --tail 100 feed-consumer-1 feed-consumer-2 | Select-String "event=review_event_consumed"
 ```
 
 Expected log:

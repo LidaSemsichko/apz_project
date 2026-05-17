@@ -33,11 +33,17 @@ services:
         condition: service_started
       auth-service-2:
         condition: service_started
-      catalog-service:
+      catalog-service-1:
         condition: service_started
-      reviews-service:
+      catalog-service-2:
         condition: service_started
-      feed-api:
+      reviews-service-1:
+        condition: service_started
+      reviews-service-2:
+        condition: service_started
+      feed-api-1:
+        condition: service_started
+      feed-api-2:
         condition: service_started
     environment:
       CONFIG_SERVER_URL: http://config-server:8000
@@ -74,13 +80,21 @@ services:
         condition: service_healthy
       auth-db:
         condition: service_healthy
-      redis:
+      redis-master:
         condition: service_healthy
+      redis-sentinel-1:
+        condition: service_started
+      redis-sentinel-2:
+        condition: service_started
+      redis-sentinel-3:
+        condition: service_started
     environment:
       CONFIG_SERVER_URL: http://config-server:8000
-      DATABASE_URL: postgresql://auth_user:auth_pass@auth-db:5432/auth_db
-      REDIS_URL: redis://redis:6379/0
-      JWT_SECRET: supersecret
+      DATABASE_URL: postgresql://${AUTH_POSTGRES_USER}:${AUTH_POSTGRES_PASSWORD}@auth-db:5432/${AUTH_POSTGRES_DB}
+      REDIS_SENTINEL_HOSTS: redis-sentinel-1:26379,redis-sentinel-2:26379,redis-sentinel-3:26379
+      REDIS_MASTER_NAME: mymaster
+      REDIS_DB: "0"
+      JWT_SECRET: ${JWT_SECRET}
       INSTANCE_NAME: auth-service-1
       PUBLIC_URL: http://auth-service-1:8000
       TOKEN_TTL_SECONDS: 3600
@@ -100,13 +114,21 @@ services:
         condition: service_healthy
       auth-db:
         condition: service_healthy
-      redis:
+      redis-master:
         condition: service_healthy
+      redis-sentinel-1:
+        condition: service_started
+      redis-sentinel-2:
+        condition: service_started
+      redis-sentinel-3:
+        condition: service_started
     environment:
       CONFIG_SERVER_URL: http://config-server:8000
-      DATABASE_URL: postgresql://auth_user:auth_pass@auth-db:5432/auth_db
-      REDIS_URL: redis://redis:6379/0
-      JWT_SECRET: supersecret
+      DATABASE_URL: postgresql://${AUTH_POSTGRES_USER}:${AUTH_POSTGRES_PASSWORD}@auth-db:5432/${AUTH_POSTGRES_DB}
+      REDIS_SENTINEL_HOSTS: redis-sentinel-1:26379,redis-sentinel-2:26379,redis-sentinel-3:26379
+      REDIS_MASTER_NAME: mymaster
+      REDIS_DB: "0"
+      JWT_SECRET: ${JWT_SECRET}
       INSTANCE_NAME: auth-service-2
       PUBLIC_URL: http://auth-service-2:8000
       TOKEN_TTL_SECONDS: 3600
@@ -114,11 +136,11 @@ services:
       - app-network
     restart: unless-stopped
 
-  catalog-service:
+  catalog-service-1:
     build:
       context: .
       dockerfile: catalog-service/Dockerfile
-    container_name: catalog-service
+    container_name: catalog-service-1
     ports:
       - "8003:8000"
     depends_on:
@@ -128,18 +150,39 @@ services:
         condition: service_completed_successfully
     environment:
       CONFIG_SERVER_URL: http://config-server:8000
-      INSTANCE_NAME: catalog-service
-      PUBLIC_URL: http://catalog-service:8000
+      INSTANCE_NAME: catalog-service-1
+      PUBLIC_URL: http://catalog-service-1:8000
       MONGO_URL: mongodb://mongo1:27017,mongo2:27017,mongo3:27017/catalog_db?replicaSet=rs0
     networks:
       - app-network
     restart: unless-stopped
 
-  reviews-service:
+  catalog-service-2:
+    build:
+      context: .
+      dockerfile: catalog-service/Dockerfile
+    container_name: catalog-service-2
+    ports:
+      - "8013:8000"
+    depends_on:
+      config-server:
+        condition: service_healthy
+      mongo-init:
+        condition: service_completed_successfully
+    environment:
+      CONFIG_SERVER_URL: http://config-server:8000
+      INSTANCE_NAME: catalog-service-2
+      PUBLIC_URL: http://catalog-service-2:8000
+      MONGO_URL: mongodb://mongo1:27017,mongo2:27017,mongo3:27017/catalog_db?replicaSet=rs0
+    networks:
+      - app-network
+    restart: unless-stopped
+
+  reviews-service-1:
     build:
       context: .
       dockerfile: reviews-service/Dockerfile
-    container_name: reviews-service
+    container_name: reviews-service-1
     ports:
       - "8004:8000"
     depends_on:
@@ -149,20 +192,43 @@ services:
         condition: service_healthy
     environment:
       CONFIG_SERVER_URL: http://config-server:8000
-      DATABASE_URL: postgresql://reviews_user:reviews_pass@reviews-db:5432/reviews_db
-      INSTANCE_NAME: reviews-service
-      PUBLIC_URL: http://reviews-service:8000
+      DATABASE_URL: postgresql://${REVIEWS_POSTGRES_USER}:${REVIEWS_POSTGRES_PASSWORD}@reviews-db:5432/${REVIEWS_POSTGRES_DB}
+      INSTANCE_NAME: reviews-service-1
+      PUBLIC_URL: http://reviews-service-1:8000
       KAFKA_BOOTSTRAP_SERVERS: kafka:9092
       KAFKA_TOPIC: review.created
     networks:
       - app-network
     restart: unless-stopped
 
-  reviews-outbox-publisher:
+  reviews-service-2:
     build:
       context: .
       dockerfile: reviews-service/Dockerfile
-    container_name: reviews-outbox-publisher
+    container_name: reviews-service-2
+    ports:
+      - "8014:8000"
+    depends_on:
+      config-server:
+        condition: service_healthy
+      reviews-db:
+        condition: service_healthy
+    environment:
+      CONFIG_SERVER_URL: http://config-server:8000
+      DATABASE_URL: postgresql://${REVIEWS_POSTGRES_USER}:${REVIEWS_POSTGRES_PASSWORD}@reviews-db:5432/${REVIEWS_POSTGRES_DB}
+      INSTANCE_NAME: reviews-service-2
+      PUBLIC_URL: http://reviews-service-2:8000
+      KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+      KAFKA_TOPIC: review.created
+    networks:
+      - app-network
+    restart: unless-stopped
+
+  reviews-outbox-publisher-1:
+    build:
+      context: .
+      dockerfile: reviews-service/Dockerfile
+    container_name: reviews-outbox-publisher-1
     command: ["python", "-m", "app.outbox_publisher"]
     depends_on:
       reviews-db:
@@ -170,18 +236,39 @@ services:
       kafka:
         condition: service_healthy
     environment:
-      DATABASE_URL: postgresql://reviews_user:reviews_pass@reviews-db:5432/reviews_db
+      DATABASE_URL: postgresql://${REVIEWS_POSTGRES_USER}:${REVIEWS_POSTGRES_PASSWORD}@reviews-db:5432/${REVIEWS_POSTGRES_DB}
       KAFKA_BOOTSTRAP_SERVERS: kafka:9092
       KAFKA_TOPIC: review.created
+      INSTANCE_NAME: reviews-outbox-publisher-1
     networks:
       - app-network
     restart: unless-stopped
 
-  feed-api:
+  reviews-outbox-publisher-2:
+    build:
+      context: .
+      dockerfile: reviews-service/Dockerfile
+    container_name: reviews-outbox-publisher-2
+    command: ["python", "-m", "app.outbox_publisher"]
+    depends_on:
+      reviews-db:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgresql://${REVIEWS_POSTGRES_USER}:${REVIEWS_POSTGRES_PASSWORD}@reviews-db:5432/${REVIEWS_POSTGRES_DB}
+      KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+      KAFKA_TOPIC: review.created
+      INSTANCE_NAME: reviews-outbox-publisher-2
+    networks:
+      - app-network
+    restart: unless-stopped
+
+  feed-api-1:
     build:
       context: .
       dockerfile: feed-service/Dockerfile
-    container_name: feed-api
+    container_name: feed-api-1
     ports:
       - "8005:8000"
     depends_on:
@@ -191,20 +278,43 @@ services:
         condition: service_healthy
     environment:
       CONFIG_SERVER_URL: http://config-server:8000
-      INSTANCE_NAME: feed-api
-      PUBLIC_URL: http://feed-api:8000
+      INSTANCE_NAME: feed-api-1
+      PUBLIC_URL: http://feed-api-1:8000
       NEO4J_URI: bolt://neo4j:7687
-      NEO4J_USER: neo4j
-      NEO4J_PASSWORD: password123
+      NEO4J_USER: ${NEO4J_USER}
+      NEO4J_PASSWORD: ${NEO4J_PASSWORD}
     networks:
       - app-network
     restart: unless-stopped
 
-  feed-consumer:
+  feed-api-2:
     build:
       context: .
       dockerfile: feed-service/Dockerfile
-    container_name: feed-consumer
+    container_name: feed-api-2
+    ports:
+      - "8015:8000"
+    depends_on:
+      config-server:
+        condition: service_healthy
+      neo4j:
+        condition: service_healthy
+    environment:
+      CONFIG_SERVER_URL: http://config-server:8000
+      INSTANCE_NAME: feed-api-2
+      PUBLIC_URL: http://feed-api-2:8000
+      NEO4J_URI: bolt://neo4j:7687
+      NEO4J_USER: ${NEO4J_USER}
+      NEO4J_PASSWORD: ${NEO4J_PASSWORD}
+    networks:
+      - app-network
+    restart: unless-stopped
+
+  feed-consumer-1:
+    build:
+      context: .
+      dockerfile: feed-service/Dockerfile
+    container_name: feed-consumer-1
     command: ["python", "-m", "app.kafka_consumer"]
     depends_on:
       neo4j:
@@ -212,9 +322,32 @@ services:
       kafka:
         condition: service_healthy
     environment:
+      INSTANCE_NAME: feed-consumer-1
       NEO4J_URI: bolt://neo4j:7687
-      NEO4J_USER: neo4j
-      NEO4J_PASSWORD: password123
+      NEO4J_USER: ${NEO4J_USER}
+      NEO4J_PASSWORD: ${NEO4J_PASSWORD}
+      KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+      KAFKA_TOPIC: review.created
+    networks:
+      - app-network
+    restart: unless-stopped
+
+  feed-consumer-2:
+    build:
+      context: .
+      dockerfile: feed-service/Dockerfile
+    container_name: feed-consumer-2
+    command: ["python", "-m", "app.kafka_consumer"]
+    depends_on:
+      neo4j:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+    environment:
+      INSTANCE_NAME: feed-consumer-2
+      NEO4J_URI: bolt://neo4j:7687
+      NEO4J_USER: ${NEO4J_USER}
+      NEO4J_PASSWORD: ${NEO4J_PASSWORD}
       KAFKA_BOOTSTRAP_SERVERS: kafka:9092
       KAFKA_TOPIC: review.created
     networks:
@@ -225,15 +358,15 @@ services:
     image: postgres:15
     container_name: auth-db
     environment:
-      POSTGRES_USER: auth_user
-      POSTGRES_PASSWORD: auth_pass
-      POSTGRES_DB: auth_db
+      POSTGRES_USER: ${AUTH_POSTGRES_USER}
+      POSTGRES_PASSWORD: ${AUTH_POSTGRES_PASSWORD}
+      POSTGRES_DB: ${AUTH_POSTGRES_DB}
     ports:
       - "5433:5432"
     volumes:
       - auth_pgdata:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U auth_user -d auth_db"]
+      test: ["CMD-SHELL", "pg_isready -U ${AUTH_POSTGRES_USER} -d ${AUTH_POSTGRES_DB}"]
       interval: 5s
       timeout: 5s
       retries: 10
@@ -246,15 +379,15 @@ services:
     image: postgres:15
     container_name: reviews-db
     environment:
-      POSTGRES_USER: reviews_user
-      POSTGRES_PASSWORD: reviews_pass
-      POSTGRES_DB: reviews_db
+      POSTGRES_USER: ${REVIEWS_POSTGRES_USER}
+      POSTGRES_PASSWORD: ${REVIEWS_POSTGRES_PASSWORD}
+      POSTGRES_DB: ${REVIEWS_POSTGRES_DB}
     ports:
       - "5434:5432"
     volumes:
       - reviews_pgdata:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U reviews_user -d reviews_db"]
+      test: ["CMD-SHELL", "pg_isready -U ${REVIEWS_POSTGRES_USER} -d ${REVIEWS_POSTGRES_DB}"]
       interval: 5s
       timeout: 5s
       retries: 10
@@ -263,9 +396,15 @@ services:
       - app-network
     restart: unless-stopped
 
-  redis:
+  redis-master:
     image: redis:7
-    container_name: redis
+    container_name: redis-master
+    command:
+      - redis-server
+      - --appendonly
+      - "yes"
+      - --replica-announce-ip
+      - "172.28.0.10"
     ports:
       - "6379:6379"
     healthcheck:
@@ -274,6 +413,184 @@ services:
       timeout: 3s
       retries: 10
       start_period: 5s
+    networks:
+      app-network:
+        ipv4_address: 172.28.0.10
+    restart: unless-stopped
+
+  redis-replica-1:
+    image: redis:7
+    container_name: redis-replica-1
+    depends_on:
+      redis-master:
+        condition: service_healthy
+    command:
+      - redis-server
+      - --replicaof
+      - "172.28.0.10"
+      - "6379"
+      - --replica-announce-ip
+      - "172.28.0.11"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 5s
+    networks:
+      app-network:
+        ipv4_address: 172.28.0.11
+    restart: unless-stopped
+
+  redis-replica-2:
+    image: redis:7
+    container_name: redis-replica-2
+    depends_on:
+      redis-master:
+        condition: service_healthy
+    command:
+      - redis-server
+      - --replicaof
+      - "172.28.0.10"
+      - "6379"
+      - --replica-announce-ip
+      - "172.28.0.12"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 5s
+    networks:
+      app-network:
+        ipv4_address: 172.28.0.12
+    restart: unless-stopped
+
+  redis-sentinel-1:
+    image: redis:7
+    container_name: redis-sentinel-1
+    depends_on:
+      redis-master:
+        condition: service_healthy
+      redis-replica-1:
+        condition: service_started
+      redis-replica-2:
+        condition: service_started
+    entrypoint: ["sh", "-c"]
+    command:
+      - |
+        cat > /tmp/sentinel.conf <<CFG
+        port 26379
+        sentinel monitor mymaster 172.28.0.10 6379 2
+        sentinel down-after-milliseconds mymaster 5000
+        sentinel failover-timeout mymaster 10000
+        sentinel parallel-syncs mymaster 1
+        CFG
+        # Raise the TILT-trigger threshold from the 2-second default to 10s.
+        #
+        # Why: on Docker Desktop / WSL2 the host occasionally suspends or
+        # de-prioritises the VM, which pauses the container clock for several
+        # seconds. Sentinel measures the gap between its own timer iterations
+        # and enters TILT mode (30-second safe-mode that refuses to perform
+        # failover) any time that gap exceeds the trigger threshold. With the
+        # 2s default Sentinel was tilting constantly on this host and could
+        # never complete a failover. 10s is permissive enough to ride out the
+        # host's stalls while still catching real clock skew.
+
+        ( sleep 5 && redis-cli -p 26379 SENTINEL DEBUG tilt-trigger 10000 >/dev/null 2>&1 ) &
+        exec redis-sentinel /tmp/sentinel.conf
+    healthcheck:
+      test: ["CMD", "redis-cli", "-p", "26379", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 10s
+    networks:
+      - app-network
+    restart: unless-stopped
+
+  redis-sentinel-2:
+    image: redis:7
+    container_name: redis-sentinel-2
+    depends_on:
+      redis-master:
+        condition: service_healthy
+      redis-replica-1:
+        condition: service_started
+      redis-replica-2:
+        condition: service_started
+    entrypoint: ["sh", "-c"]
+    command:
+      - |
+        cat > /tmp/sentinel.conf <<CFG
+        port 26379
+        sentinel monitor mymaster 172.28.0.10 6379 2
+        sentinel down-after-milliseconds mymaster 5000
+        sentinel failover-timeout mymaster 10000
+        sentinel parallel-syncs mymaster 1
+        CFG
+        # Raise the TILT-trigger threshold from the 2-second default to 10s.
+        #
+        # Why: on Docker Desktop / WSL2 the host occasionally suspends or
+        # de-prioritises the VM, which pauses the container clock for several
+        # seconds. Sentinel measures the gap between its own timer iterations
+        # and enters TILT mode (30-second safe-mode that refuses to perform
+        # failover) any time that gap exceeds the trigger threshold. With the
+        # 2s default Sentinel was tilting constantly on this host and could
+        # never complete a failover. 10s is permissive enough to ride out the
+        # host's stalls while still catching real clock skew.
+
+        ( sleep 5 && redis-cli -p 26379 SENTINEL DEBUG tilt-trigger 10000 >/dev/null 2>&1 ) &
+        exec redis-sentinel /tmp/sentinel.conf
+    healthcheck:
+      test: ["CMD", "redis-cli", "-p", "26379", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 10s
+    networks:
+      - app-network
+    restart: unless-stopped
+
+  redis-sentinel-3:
+    image: redis:7
+    container_name: redis-sentinel-3
+    depends_on:
+      redis-master:
+        condition: service_healthy
+      redis-replica-1:
+        condition: service_started
+      redis-replica-2:
+        condition: service_started
+    entrypoint: ["sh", "-c"]
+    command:
+      - |
+        cat > /tmp/sentinel.conf <<CFG
+        port 26379
+        sentinel monitor mymaster 172.28.0.10 6379 2
+        sentinel down-after-milliseconds mymaster 5000
+        sentinel failover-timeout mymaster 10000
+        sentinel parallel-syncs mymaster 1
+        CFG
+        # Raise the TILT-trigger threshold from the 2-second default to 10s.
+        #
+        # Why: on Docker Desktop / WSL2 the host occasionally suspends or
+        # de-prioritises the VM, which pauses the container clock for several
+        # seconds. Sentinel measures the gap between its own timer iterations
+        # and enters TILT mode (30-second safe-mode that refuses to perform
+        # failover) any time that gap exceeds the trigger threshold. With the
+        # 2s default Sentinel was tilting constantly on this host and could
+        # never complete a failover. 10s is permissive enough to ride out the
+        # host's stalls while still catching real clock skew.
+
+        ( sleep 5 && redis-cli -p 26379 SENTINEL DEBUG tilt-trigger 10000 >/dev/null 2>&1 ) &
+        exec redis-sentinel /tmp/sentinel.conf
+    healthcheck:
+      test: ["CMD", "redis-cli", "-p", "26379", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 10s
     networks:
       - app-network
     restart: unless-stopped
@@ -412,6 +729,7 @@ services:
       KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
       KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
       KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
+      KAFKA_NUM_PARTITIONS: 3
     healthcheck:
       test: ["CMD-SHELL", "kafka-topics --bootstrap-server localhost:9092 --list >/dev/null 2>&1"]
       interval: 10s
@@ -429,7 +747,7 @@ services:
       - "7474:7474"
       - "7687:7687"
     environment:
-      NEO4J_AUTH: neo4j/password123
+      NEO4J_AUTH: ${NEO4J_USER}/${NEO4J_PASSWORD}
     volumes:
       - neo4j_data:/data
     healthcheck:
@@ -453,3 +771,12 @@ volumes:
 networks:
   app-network:
     driver: bridge
+    ipam:
+      driver: default
+      config:
+        - subnet: 172.28.0.0/16
+          # Reserved static IPs (see redis-master / redis-replica-{1,2}):
+          #   172.28.0.10  redis-master
+          #   172.28.0.11  redis-replica-1
+          #   172.28.0.12  redis-replica-2
+          # All other containers get dynamic IPs from this subnet.
