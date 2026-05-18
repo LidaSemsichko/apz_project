@@ -775,8 +775,9 @@ networks:
       driver: default
       config:
         - subnet: 172.28.0.0/16
+          ip_range: 172.28.128.0/17
           # Reserved static IPs (see redis-master / redis-replica-{1,2}):
           #   172.28.0.10  redis-master
           #   172.28.0.11  redis-replica-1
           #   172.28.0.12  redis-replica-2
-          # All other containers get dynamic IPs from this subnet.
+          # All other containers get dynamic IPs from ip_range, outside the reserved addresses.
